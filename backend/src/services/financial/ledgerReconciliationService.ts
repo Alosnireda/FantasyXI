@@ -754,7 +754,12 @@ export function reportToJson(report: LedgerReconciliationReport): string {
 }
 
 function cell(value: unknown): string {
-  return value === null || value === undefined || value === "" ? "-" : String(value).replace(/\|/g, "\\|");
+  if (value === null || value === undefined || value === "") return "-";
+  // Escape backslashes before pipes so an input like "\|" cannot break out of the cell
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/[\r\n]+/g, " ");
 }
 
 export function reportToMarkdown(report: LedgerReconciliationReport): string {

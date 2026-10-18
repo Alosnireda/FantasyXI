@@ -298,6 +298,19 @@ describe("LedgerReconciliationService", () => {
     const balanced = reportToMarkdown(await createService(cleanFixture()).service.reconcile());
     assert.match(balanced, /No discrepancies found/);
   });
+
+  it("escapes backslashes, pipes and newlines in Markdown table cells", async () => {
+    const fixture = cleanFixture();
+    fixture.rows.push(row(TransactionType.ENTRY_FEE, h("escape"), "10.00"));
+    const { service } = createService(fixture);
+    const report = await service.reconcile({ notify: false });
+    report.discrepancies[0].message = "a\\|b | c\nd";
+
+    const tableRow = reportToMarkdown(report).split("\n").find((l) => l.includes(h("escape")))!;
+    assert.ok(tableRow.includes("a\\\\\\|b \\| c d"), tableRow);
+    // The row still has exactly 10 cells (11 unescaped pipes)
+    assert.equal(tableRow.replace(/\\\\/g, "").replace(/\\\|/g, "").split("|").length - 1, 11);
+  });
 });
 
 describe("Escrow event parsing", () => {

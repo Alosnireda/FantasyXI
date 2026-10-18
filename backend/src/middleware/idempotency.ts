@@ -119,7 +119,7 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}): R
     const store = getStore();
 
     const unavailable = (error: unknown) => {
-      console.error(`[idempotency] Store unavailable for ${storageKey}:`, (error as Error).message);
+      console.error("[idempotency] Store unavailable for %s: %s", storageKey, (error as Error).message);
       res.status(503).json({
         success: false,
         code: "IDEMPOTENCY_UNAVAILABLE",
@@ -163,7 +163,7 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}): R
     // Keep the lock alive while a slow handler runs (Redlock-style extension)
     const heartbeat = setInterval(() => {
       store.markInProgress(storageKey, token, lockTtlMs).catch((error) => {
-        console.warn(`[idempotency] Failed to extend lock ${storageKey}:`, (error as Error).message);
+        console.warn("[idempotency] Failed to extend lock %s: %s", storageKey, (error as Error).message);
       });
     }, Math.max(Math.floor(lockTtlMs / 3), 100));
     heartbeat.unref();
@@ -200,10 +200,10 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}): R
           ttlSeconds
         );
         if (!saved) {
-          console.warn(`[idempotency] Lock for ${storageKey} expired before the response was stored`);
+          console.warn("[idempotency] Lock for %s expired before the response was stored", storageKey);
         }
       } catch (error) {
-        console.error(`[idempotency] Failed to settle ${storageKey}:`, (error as Error).message);
+        console.error("[idempotency] Failed to settle %s: %s", storageKey, (error as Error).message);
       }
     };
 
