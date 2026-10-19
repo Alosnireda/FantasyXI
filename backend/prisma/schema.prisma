@@ -305,6 +305,7 @@ model PlayerGameweekStats {
   yellowCards Int     @default(0) @map("yellow_cards")
   redCards    Int     @default(0) @map("red_cards")
   saves       Int     @default(0)
+  bps         Int     @default(0)
   bonus       Int     @default(0)
   totalPoints Int     @default(0) @map("total_points")
 
@@ -375,6 +376,8 @@ model League {
   prizePool       Decimal      @default(0) @map("prize_pool") @db.Decimal(10, 2)
   status          LeagueStatus @default(UPCOMING)
   scoringType     ScoringType  @default(CLASSIC) @map("scoring_type")
+  payoutPreset    String       @default("standard") @map("payout_preset")
+  payoutSplitsBps Int[]        @default([]) @map("payout_splits_bps")
   /// Private leagues are hidden from public search and joinable only via invitation
   isPrivate       Boolean      @default(false) @map("is_private")
   startGameweekId Int          @map("start_gameweek_id")

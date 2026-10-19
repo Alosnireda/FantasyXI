@@ -394,6 +394,7 @@ export class FplSyncService {
           yellowCards: s.yellowCards,
           redCards: s.redCards,
           saves: s.saves,
+          bps: s.bps,
           bonus: s.bonus,
           totalPoints: s.totalPoints,
         })
@@ -423,6 +424,7 @@ export class FplSyncService {
           yellowCards: stats.yellowCards,
           redCards: stats.redCards,
           saves: stats.saves,
+          bps: stats.bps,
           bonus: stats.bonus,
           totalPoints: stats.totalPoints,
         };

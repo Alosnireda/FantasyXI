@@ -71,4 +71,21 @@ describe("PrizeService Deterministic Calculations", () => {
       /must be non-negative/
     );
   });
+
+  it("supports winner-takes-all and top-five tiers with exact odd-cent conservation", () => {
+    const winner = PrizeService.calculatePrizeDistribution(9, 1.01, { preset: "winner-takes-all" });
+    assert.deepEqual(winner.payouts, [8.64]);
+    const topFive = PrizeService.calculatePrizeDistribution(7, 1.01, { preset: "top-five" });
+    assert.equal(topFive.payouts.length, 5);
+    assert.equal(Math.round(topFive.payouts.reduce((sum, value) => sum + value, 0) * 100), Math.round(topFive.prizePool * 100));
+  });
+
+  it("validates custom basis-point splits and encodes accepted values for Soroban", () => {
+    const splits = [5000, 3000, 2000];
+    assert.deepEqual(PrizeService.encodeSorobanDistribution(splits), splits);
+    const result = PrizeService.calculatePrizeDistribution(7, 2, { preset: "custom", customSplitsBps: splits });
+    assert.equal(Math.round(result.payouts.reduce((sum, value) => sum + value, 0) * 100), Math.round(result.prizePool * 100));
+    assert.throws(() => PrizeService.encodeSorobanDistribution([10001]), /totaling 10000/);
+    assert.throws(() => PrizeService.encodeSorobanDistribution([-1, 10001]), /non-negative/);
+  });
 });

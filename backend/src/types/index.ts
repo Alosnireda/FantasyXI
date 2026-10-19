@@ -233,6 +233,8 @@ export interface CreateLeagueInput {
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
   isPrivate?: boolean; // default false: private leagues are invitation-only
+  payoutPreset?: "standard" | "winner-takes-all" | "top-five" | "custom";
+  customPrizeSplitsBps?: number[];
 }
 
 export interface CreateLeagueTierGroupInput {

@@ -1,6 +1,7 @@
 import { prisma } from "../../config/db.js";
 import { MembershipStatus, Position } from "../../types/index.js";
 import { ScoringService, PlayerScoreDetail } from "../scoring/scoringService.js";
+import { allocateProvisionalBonus } from "../scoring/provisionalBps.js";
 
 /**
  * Live Matchday Service.
@@ -52,6 +53,8 @@ export interface LiveSnapshot {
     redCards: number;
     saves: number;
     bonus: number;
+    bps: number;
+    provisionalBonus: number;
     totalPoints: number;
   }>;
   standings: LiveStandingsEntry[];
@@ -185,6 +188,13 @@ export class LiveService {
       };
     });
 
+    const provisionalBonuses = allocateProvisionalBonus(stats.map((stat: any) => ({
+      playerId: stat.playerId,
+      fixtureId: stat.fixtureId,
+      bps: stat.bps ?? 0,
+      minutes: stat.minutes,
+    })));
+
     return {
       leagueId: league.id,
       gameweek: gameweek ? { id: gameweek.id, name: gameweek.name } : null,
@@ -202,7 +212,7 @@ export class LiveService {
       events: stats
         .filter(
           (s: any) =>
-            s.goals || s.assists || s.yellowCards || s.redCards || s.saves || s.bonus
+            s.goals || s.assists || s.yellowCards || s.redCards || s.saves || s.bonus || s.bps
         )
         .map((s: any) => ({
           playerId: s.playerId,
@@ -214,6 +224,8 @@ export class LiveService {
           redCards: s.redCards,
           saves: s.saves,
           bonus: s.bonus,
+          bps: s.bps ?? 0,
+          provisionalBonus: provisionalBonuses.get(`${s.fixtureId}:${s.playerId}`) ?? 0,
           totalPoints: s.totalPoints,
         })),
       standings: rankLiveStandings(entries),
