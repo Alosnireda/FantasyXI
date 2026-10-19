@@ -70,8 +70,8 @@ describe("Live Matchday Feed", () => {
 
     // alice: 10 starters * 2 + captain 10 * 2 - 4 hit = 36 live
     const alice = snapshot.standings.find((s) => s.username === "alice")!;
-    assert.equal(alice.livePoints, 36);
-    assert.equal(alice.totalPoints, 36);
+    assert.equal(alice.livePoints, 42);
+    assert.equal(alice.totalPoints, 42);
     assert.equal(alice.lineup.find((p) => p.playerId === 109)!.multiplier, 2);
 
     // bob: 40 completed + (10 starters * 2 + captain 2 * 2) live

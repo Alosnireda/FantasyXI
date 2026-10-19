@@ -159,9 +159,22 @@ export class LiveService {
       transferHits.map((h: any) => [h.squadId, h._sum.pointsCost ?? 0])
     );
 
-    const statsMap = new Map<number, { minutes: number; totalPoints: number }>(
-      stats.map((s: any) => [s.playerId, { minutes: s.minutes, totalPoints: s.totalPoints }])
-    );
+    const provisionalBonuses = allocateProvisionalBonus(stats.map((stat: any) => ({
+      playerId: stat.playerId,
+      fixtureId: stat.fixtureId,
+      bps: stat.bps ?? 0,
+      minutes: stat.minutes,
+    })));
+
+    const statsMap = new Map<number, { minutes: number; totalPoints: number }>();
+    for (const stat of stats) {
+      const current = statsMap.get(stat.playerId) ?? { minutes: 0, totalPoints: 0 };
+      statsMap.set(stat.playerId, {
+        minutes: current.minutes + stat.minutes,
+        totalPoints: current.totalPoints + stat.totalPoints - (stat.bonus ?? 0) +
+          (provisionalBonuses.get(`${stat.fixtureId}:${stat.playerId}`) ?? 0),
+      });
+    }
     const completedBySquad = new Map<string, number>();
     for (const score of completedScores) {
       completedBySquad.set(score.squadId, (completedBySquad.get(score.squadId) ?? 0) + score.points);
@@ -201,13 +214,6 @@ export class LiveService {
       };
     });
 
-    const provisionalBonuses = allocateProvisionalBonus(stats.map((stat: any) => ({
-      playerId: stat.playerId,
-      fixtureId: stat.fixtureId,
-      bps: stat.bps ?? 0,
-      minutes: stat.minutes,
-    })));
-
     const snapshot: LiveSnapshot = {
       leagueId: league.id,
       gameweek: gameweek ? { id: gameweek.id, name: gameweek.name } : null,
@@ -239,7 +245,7 @@ export class LiveService {
           bonus: s.bonus,
           bps: s.bps ?? 0,
           provisionalBonus: provisionalBonuses.get(`${s.fixtureId}:${s.playerId}`) ?? 0,
-          totalPoints: s.totalPoints,
+          totalPoints: s.totalPoints - (s.bonus ?? 0) + (provisionalBonuses.get(`${s.fixtureId}:${s.playerId}`) ?? 0),
         })),
       standings: rankLiveStandings(entries),
       generatedAt: new Date().toISOString(),
