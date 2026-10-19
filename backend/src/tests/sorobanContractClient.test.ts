@@ -110,4 +110,59 @@ describe("SorobanContractClient RPC pipeline", () => {
     assert.equal(await client.getLeague(8), null);
     assert.deepEqual(server.calls.send, []);
   });
+
+  it("returns a fee estimate for a deposit without signing or submitting", async () => {
+    const server = createMockServer([successSimulation()]);
+    const result = await createClient(server).simulateDepositTransaction(
+      admin.publicKey(),
+      "00000000-0000-0000-0000-000000000007"
+    );
+
+    assert.deepEqual(result, {
+      success: true,
+      minResourceFee: "100",
+      needsRestoration: false,
+      estimatedFeeXlm: "0.00002",
+    });
+    assert.deepEqual(server.calls.send, []);
+  });
+
+  it("includes state restoration fees when simulation returns a restore preamble", async () => {
+    const restoreSimulation = {
+      ...successSimulation(),
+      restorePreamble: {
+        minResourceFee: "500",
+        transactionData: new SorobanDataBuilder(),
+      },
+    };
+    const server = createMockServer([restoreSimulation]);
+    const result = await createClient(server).simulateDepositTransaction(
+      admin.publicKey(),
+      "00000000-0000-0000-0000-000000000007"
+    );
+
+    assert.deepEqual(result, {
+      success: true,
+      minResourceFee: "100",
+      needsRestoration: true,
+      estimatedFeeXlm: "0.00008",
+    });
+    assert.deepEqual(server.calls.send, []);
+  });
+
+  it("returns a specific simulation error instead of submitting", async () => {
+    const server = createMockServer([
+      { id: "1", latestLedger: 100, events: [], _parsed: true, error: "HostError: insufficient balance" },
+    ]);
+    const result = await createClient(server).simulateDepositTransaction(
+      admin.publicKey(),
+      "00000000-0000-0000-0000-000000000007"
+    );
+
+    assert.deepEqual(result, {
+      success: false,
+      error: "Simulation failed: HostError: insufficient balance",
+    });
+    assert.deepEqual(server.calls.send, []);
+  });
 });

@@ -29,6 +29,7 @@ import {
   nativeToScVal,
   rpc,
   scValToNative,
+  StrKey,
   xdr,
   type Transaction,
 } from "@stellar/stellar-sdk";
@@ -55,6 +56,7 @@ import {
   ESCROW_ERROR_CATALOG,
   type ParsedSorobanError,
 } from "./sorobanErrorRecovery.js";
+import { toContractLeagueId } from "./contractLeagueId.js";
 
 export {
   parseSorobanError,
@@ -90,6 +92,15 @@ export interface InvocationResult {
   humanError?: string;
   isRetryable?: boolean;
 }
+
+export type DepositSimulationResult =
+  | {
+      success: true;
+      minResourceFee: string;
+      needsRestoration: boolean;
+      estimatedFeeXlm: string;
+    }
+  | { success: false; error: string };
 
 export class SorobanContractClient {
   private static configuredSigner?: StellarTransactionSigner;
@@ -401,6 +412,61 @@ export class SorobanContractClient {
       SorobanContractClient.address(participantPublic),
       SorobanContractClient.u64(leagueId),
     ]);
+  }
+
+  /** Simulates a user's deposit without signing or submitting a transaction. */
+  public async simulateDepositTransaction(
+    participantPublic: string,
+    leagueId: number | bigint | string
+  ): Promise<DepositSimulationResult> {
+    if (!StrKey.isValidEd25519PublicKey(participantPublic)) {
+      return { success: false, error: "A valid Stellar public key is required." };
+    }
+
+    let contractLeagueId: bigint;
+    try {
+      contractLeagueId =
+        typeof leagueId === "string" && !/^\d+$/.test(leagueId)
+          ? toContractLeagueId(leagueId)
+          : BigInt(leagueId);
+    } catch {
+      return { success: false, error: "A valid league ID is required." };
+    }
+
+    try {
+      const account = await this.server.getAccount(participantPublic);
+      const transaction = this.buildInvocation(account, this.escrowContractId, "deposit", [
+        SorobanContractClient.address(participantPublic),
+        SorobanContractClient.u64(contractLeagueId),
+      ]);
+      const simulation = await this.server.simulateTransaction(transaction);
+      if (rpc.Api.isSimulationError(simulation)) {
+        return { success: false, error: `Simulation failed: ${simulation.error}` };
+      }
+
+      const needsRestoration = rpc.Api.isSimulationRestore(simulation);
+      const minResourceFee = BigInt(simulation.minResourceFee ?? "0");
+      const restorationResourceFee = needsRestoration
+        ? BigInt(simulation.restorePreamble.minResourceFee ?? "0")
+        : 0n;
+      const baseFees = BigInt(BASE_FEE) * (needsRestoration ? 2n : 1n);
+      const totalFeeStroops = baseFees + minResourceFee + restorationResourceFee;
+      const wholeXlm = totalFeeStroops / 10_000_000n;
+      const fractionalXlm = (totalFeeStroops % 10_000_000n)
+        .toString()
+        .padStart(7, "0")
+        .replace(/0+$/, "");
+
+      return {
+        success: true,
+        minResourceFee: minResourceFee.toString(),
+        needsRestoration,
+        estimatedFeeXlm: fractionalXlm ? `${wholeXlm}.${fractionalXlm}` : wholeXlm.toString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Soroban RPC error";
+      return { success: false, error: `Unable to simulate deposit: ${message}` };
+    }
   }
 
   /** Publishes a commitment to a finalized gameweek's score set on Soroban. */
