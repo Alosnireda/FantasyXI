@@ -68,8 +68,7 @@ function sendLeagueError(error: unknown, res: Response): boolean {
     return true;
   }
   if (error instanceof LeagueInvitationError) {
-    // 410 Gone: the link is unusable (unknown, expired, revoked or already used)
-    res.status(410).json({ success: false, message: error.message });
+    res.status(error.statusCode).json({ success: false, message: error.message });
     return true;
   }
   if (error instanceof LeagueValidationError) {
@@ -340,7 +339,7 @@ export async function cancelLeague(
 
 /**
  * POST /api/v1/leagues/:id/invitations (creator only)
- * Body: { expiresInHours?: number }
+ * Body: { expiresInHours?: number, maxUses?: number }
  * Returns the raw token once; the client builds the shareable link from it.
  */
 export async function createLeagueInvitation(
@@ -356,16 +355,18 @@ export async function createLeagueInvitation(
 
     const raw = req.body?.expiresInHours;
     const expiresInHours = raw === undefined ? INVITATION_DEFAULT_TTL_HOURS : Number(raw);
+    const maxUses = req.body?.maxUses === undefined ? 1 : Number(req.body.maxUses);
 
     const invitation = await leagueService.createInvitation(
       req.params.id as string,
       req.user.id,
-      expiresInHours
+      expiresInHours,
+      maxUses
     );
 
     res.status(201).json({
       success: true,
-      message: "Invitation created. The link can be used once and cannot be retrieved again.",
+      message: "Invitation created. The link can be used up to its configured limit and cannot be retrieved again.",
       data: invitation,
     });
   } catch (error) {

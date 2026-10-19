@@ -60,9 +60,12 @@ export class LeagueForbiddenError extends Error {
 
 /** Raised for invitation links that are unknown, expired, revoked or already used. */
 export class LeagueInvitationError extends Error {
-  constructor(message: string) {
+  public readonly statusCode: number;
+
+  constructor(message: string, statusCode: number = 410) {
     super(message);
     this.name = "LeagueInvitationError";
+    this.statusCode = statusCode;
   }
 }
 
@@ -540,11 +543,8 @@ export class LeagueService {
   }
 
   /**
-   * Joins an upcoming league with a valid fantasy squad.
-   *
-   * Private leagues require a valid invitation token. The invitation is consumed in
-   * the same transaction that creates the membership, so a link can never admit
-   * more than one user, even under concurrent requests.
+   * Joins an upcoming league with a valid fantasy squad. Private invitation usage
+   * is incremented in the same transaction that creates the membership.
    */
   public async joinLeague(
     leagueId: string,
@@ -563,6 +563,8 @@ export class LeagueService {
 
     // 0. Private leagues are invitation-only
     let invitationId: string | null = null;
+    let invitationMaxUses = 1;
+    let invitationUsesCount = 0;
     if (league.isPrivate) {
       if (!options.invitationToken) {
         throw new LeagueForbiddenError(
@@ -574,6 +576,8 @@ export class LeagueService {
         throw new LeagueInvitationError("This invitation is not valid for this league");
       }
       invitationId = invitation.id;
+      invitationMaxUses = invitation.maxUses;
+      invitationUsesCount = invitation.usesCount;
     }
 
     // 1. Must be in UPCOMING state
@@ -628,19 +632,31 @@ export class LeagueService {
 
     return this.db.$transaction(async (tx: any) => {
       if (invitationId) {
-        // Conditional update = atomic single-use check; loses the race if already consumed
+        // Conditional update enforces the usage cap atomically under concurrent requests.
         const now = new Date();
         const consumed = await tx.leagueInvitation.updateMany({
           where: {
             id: invitationId,
-            usedAt: null,
             revokedAt: null,
             expiresAt: { gt: now },
+            usesCount: { lt: invitationMaxUses },
           },
-          data: { usedAt: now, usedById: userId },
+          data: {
+            usesCount: { increment: 1 },
+            ...(invitationUsesCount + 1 >= invitationMaxUses
+              ? { usedAt: now, usedById: userId }
+              : {}),
+          },
         });
         if (consumed.count !== 1) {
-          throw new LeagueInvitationError("This invitation link has already been used or has expired");
+          const current = await tx.leagueInvitation.findUnique({ where: { id: invitationId } });
+          if (current?.revokedAt) {
+            throw new LeagueInvitationError("This invitation link has been revoked");
+          }
+          if (current && new Date(current.expiresAt).getTime() <= now.getTime()) {
+            throw new LeagueInvitationError("Invitation link has expired", 400);
+          }
+          throw new LeagueInvitationError("Maximum invite uses reached", 400);
         }
       }
 
@@ -685,13 +701,14 @@ export class LeagueService {
   }
 
   /**
-   * Creates a single-use invitation link for a private league. Creator only.
+   * Creates an expiring invitation link with a configurable redemption cap. Creator only.
    * The raw token is returned exactly once and cannot be recovered later.
    */
   public async createInvitation(
     leagueId: string,
     requesterUserId: string,
-    expiresInHours: number = INVITATION_DEFAULT_TTL_HOURS
+    expiresInHours: number = INVITATION_DEFAULT_TTL_HOURS,
+    maxUses: number = 1
   ) {
     if (
       !Number.isFinite(expiresInHours) ||
@@ -701,6 +718,9 @@ export class LeagueService {
       throw new LeagueValidationError(
         `expiresInHours must be between 1 and ${INVITATION_MAX_TTL_HOURS}`
       );
+    }
+    if (!Number.isSafeInteger(maxUses) || maxUses < 1 || maxUses > 2_147_483_647) {
+      throw new LeagueValidationError("maxUses must be a positive integer");
     }
 
     const league = await this.requireOwnedLeague(leagueId, requesterUserId);
@@ -722,6 +742,8 @@ export class LeagueService {
         tokenHash: LeagueService.hashInvitationToken(token),
         createdById: requesterUserId,
         expiresAt: new Date(Date.now() + Math.round(expiresInHours * 3_600_000)),
+        maxUses,
+        usesCount: 0,
       },
     });
 
@@ -730,6 +752,8 @@ export class LeagueService {
       leagueId,
       token,
       expiresAt: invitation.expiresAt,
+      maxUses: invitation.maxUses,
+      usesCount: invitation.usesCount,
       createdAt: invitation.createdAt,
     };
   }
@@ -745,6 +769,8 @@ export class LeagueService {
       select: {
         id: true,
         expiresAt: true,
+        maxUses: true,
+        usesCount: true,
         usedAt: true,
         revokedAt: true,
         createdAt: true,
@@ -764,8 +790,23 @@ export class LeagueService {
    */
   public async revokeInvitation(leagueId: string, invitationId: string, requesterUserId: string) {
     await this.requireOwnedLeague(leagueId, requesterUserId);
+    const invitation = await this.db.leagueInvitation.findUnique({ where: { id: invitationId } });
+    if (
+      !invitation ||
+      invitation.leagueId !== leagueId ||
+      LeagueService.invitationState(invitation) !== "ACTIVE"
+    ) {
+      throw new LeagueInvitationError("Invitation not found, already used or already revoked");
+    }
+
     const revoked = await this.db.leagueInvitation.updateMany({
-      where: { id: invitationId, leagueId, usedAt: null, revokedAt: null },
+      where: {
+        id: invitationId,
+        leagueId,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+        usesCount: { lt: invitation.maxUses },
+      },
       data: { revokedAt: new Date() },
     });
     if (revoked.count !== 1) {
@@ -811,10 +852,21 @@ export class LeagueService {
   }
 
   private static invitationState(
-    inv: { usedAt: Date | null; revokedAt: Date | null; expiresAt: Date },
+    inv: {
+      usedAt: Date | null;
+      revokedAt: Date | null;
+      expiresAt: Date;
+      maxUses?: number;
+      usesCount?: number;
+    },
     now: number = Date.now()
   ): "ACTIVE" | "USED" | "REVOKED" | "EXPIRED" {
-    if (inv.usedAt) return "USED";
+    if (
+      (inv.maxUses !== undefined && (inv.usesCount ?? 0) >= inv.maxUses) ||
+      (inv.usedAt && (inv.usesCount ?? 0) === 0)
+    ) {
+      return "USED";
+    }
     if (inv.revokedAt) return "REVOKED";
     if (new Date(inv.expiresAt).getTime() <= now) return "EXPIRED";
     return "ACTIVE";
@@ -834,11 +886,11 @@ export class LeagueService {
 
     switch (LeagueService.invitationState(invitation)) {
       case "USED":
-        throw new LeagueInvitationError("This invitation link has already been used");
+        throw new LeagueInvitationError("Maximum invite uses reached", 400);
       case "REVOKED":
         throw new LeagueInvitationError("This invitation link has been revoked");
       case "EXPIRED":
-        throw new LeagueInvitationError("This invitation link has expired");
+        throw new LeagueInvitationError("Invitation link has expired", 400);
       default:
         return invitation;
     }
