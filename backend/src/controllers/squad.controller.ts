@@ -3,6 +3,7 @@ import {
   squadService,
   SquadForbiddenError,
   ChipUnavailableError,
+  ChipCancellationLockedError,
 } from "../services/squad/squadService.js";
 import {
   SquadValidationError,
@@ -297,6 +298,36 @@ export async function activateChip(
         success: false,
         message: error.message,
       });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function cancelChip(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required to cancel a chip" });
+      return;
+    }
+    const gameweekId = Number(req.params.gameweekId);
+    if (!Number.isInteger(gameweekId) || gameweekId < 1) {
+      res.status(400).json({ success: false, message: "A valid gameweekId is required" });
+      return;
+    }
+    const usage = await squadService.cancelChip(req.params.id as string, gameweekId, req.user.id);
+    res.status(200).json({ success: true, message: "Chip cancelled and squad restored", data: usage });
+  } catch (error) {
+    if (error instanceof ChipCancellationLockedError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof SquadForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof ChipUnavailableError || error instanceof SquadValidationError) {
+      res.status(400).json({ success: false, message: error.message });
       return;
     }
     next(error);

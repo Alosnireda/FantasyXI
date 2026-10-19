@@ -3,7 +3,6 @@ import { collectMatchdaySyncTasks } from "../jobs/matchdayPolling.js";
 import { lockDueGameweeks } from "../jobs/deadlineLocking.js";
 import { settleCompletedGameweeks } from "../jobs/gameweekSettlement.js";
 import { processLeagueRefunds } from "../jobs/leagueRefunds.js";
-import { syncDailyPlayerPrices } from "../jobs/priceSync.js";
 import { runLedgerReconciliationJob } from "../jobs/ledgerReconciliation.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import {
@@ -12,6 +11,7 @@ import {
   FPL_SYNC_QUEUE_NAME,
   FPL_SYNC_RETRY_LIMIT,
   fplSyncQueueConfig,
+  fplTaskPriority,
   type FplSyncTask,
 } from "./fplSyncQueue.js";
 
@@ -49,7 +49,14 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeks() },
   { name: "gameweek-settlement", cron: "*/5 * * * *", handler: () => settleCompletedGameweeks() },
   { name: "league-refunds", cron: "*/5 * * * *", handler: () => processLeagueRefunds() },
-  { name: "price-sync", cron: "0 3 * * *", handler: () => syncDailyPlayerPrices() },
+  {
+    name: "price-sync",
+    cron: "0 3 * * *",
+    handler: async () => {
+      await enqueueFplSync({ type: "daily-players" });
+      return { enqueued: "daily-player-info" };
+    },
+  },
   { name: "ledger-reconciliation", cron: "30 2 * * *", handler: () => runLedgerReconciliationJob() },
   { name: "retroactive-bps", cron: "*/30 * * * *", handler: () => applyRetroactiveBpsAdjustments() },
 ];
@@ -90,7 +97,7 @@ export async function enqueueFplSync(task: FplSyncTask): Promise<void> {
   if (!boss) {
     throw new Error("[jobs] Job queue is not running; cannot enqueue FPL sync task");
   }
-  await boss.send(FPL_SYNC_QUEUE_NAME, task);
+  await boss.send(FPL_SYNC_QUEUE_NAME, task, { priority: fplTaskPriority(task) });
 }
 
 /**

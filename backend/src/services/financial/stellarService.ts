@@ -557,6 +557,16 @@ export class StellarService {
     return client.refund(adminSecret, adminPublic, leagueId, participants);
   }
 
+  /** Refund one authenticated deposit without cancelling the league. */
+  public async refundDeposit(leagueId: number | bigint, participant: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) throw new Error("TESTNET_ADMIN_SECRET is required to execute refunds");
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.refundDeposit(adminSecret, adminPublic, leagueId, participant);
+  }
+
   /**
    * Reconcile database expectations with live on-chain Soroban escrow state.
    */
