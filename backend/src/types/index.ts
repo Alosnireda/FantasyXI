@@ -390,6 +390,7 @@ export interface SettlementPlan {
   platformFee: number;
   netPrizePool: number;
   winners: SettlementWinner[];
+  distributionBps?: number[];
   canSettle: boolean;
   proofHash?: string;
   unsettledReason?: string;

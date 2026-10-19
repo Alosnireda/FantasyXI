@@ -836,6 +836,9 @@ export class FinancialService {
       platformFee: distribution.platformFee,
       netPrizePool: distribution.prizePool,
       winners,
+      ...(league.payoutPreset && league.payoutPreset !== "standard" && distribution.prizePool > 0 && winners.length > 0
+        ? { distributionBps: PrizeService.encodeSorobanPayoutAmounts(winners.map((winner) => winner.prizeAmount), distribution.prizePool) }
+        : {}),
       canSettle: true,
       proofHash,
     };
@@ -900,7 +903,8 @@ export class FinancialService {
           winner: winner.stellarAddress,
           amount: toStroops(winner.prizeAmount).toString(),
         })),
-        toStroops(plan.platformFee)
+        toStroops(plan.platformFee),
+        plan.distributionBps
       );
     } catch (error) {
       throw new FinancialConflictError(

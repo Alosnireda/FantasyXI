@@ -493,7 +493,8 @@ export class StellarService {
   public async settleLeague(
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
-    platformFeeStroops: bigint
+    platformFeeStroops: bigint,
+    distributionBps?: number[]
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
     if (!client) {
@@ -512,7 +513,8 @@ export class StellarService {
       leagueId,
       winners,
       stellarConfig.treasuryAddress,
-      platformFeeStroops
+      platformFeeStroops,
+      distributionBps
     );
   }
 

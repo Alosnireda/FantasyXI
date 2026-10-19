@@ -33,6 +33,7 @@ import {
   xdr,
   type Transaction,
 } from "@stellar/stellar-sdk";
+import { PrizeService } from "../league/prizeService.js";
 import {
   LocalSecretTransactionSigner,
   type StellarTransactionSigner,
@@ -494,9 +495,22 @@ export class SorobanContractClient {
     leagueId: number | bigint,
     winners: WinnerPayoutParam[],
     platformTreasury: string,
-    platformFeeStroops: bigint
+    platformFeeStroops: bigint,
+    distributionBps?: number[]
   ): Promise<InvocationResult> {
     const winnersScVal = SorobanContractClient.winnersScVal(winners);
+
+    if (distributionBps) {
+      PrizeService.encodeSorobanDistribution(distributionBps);
+      return this.invoke(adminSecret, this.escrowContractId, "settle_with_distribution", [
+        SorobanContractClient.address(adminPublic),
+        SorobanContractClient.u64(leagueId),
+        winnersScVal,
+        SorobanContractClient.address(platformTreasury),
+        SorobanContractClient.i128(platformFeeStroops),
+        xdr.ScVal.scvVec(distributionBps.map((value) => nativeToScVal(value, { type: "u32" }))),
+      ]);
+    }
 
     return this.invoke(adminSecret, this.escrowContractId, "settle", [
       SorobanContractClient.address(adminPublic),

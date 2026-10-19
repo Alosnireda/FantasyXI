@@ -1,4 +1,5 @@
 import { prisma } from "../../config/db.js";
+import { getRedisClient, type IRedisCacheClient } from "../../config/redis.js";
 import { MembershipStatus, Position } from "../../types/index.js";
 import { ScoringService, PlayerScoreDetail } from "../scoring/scoringService.js";
 import { allocateProvisionalBonus } from "../scoring/provisionalBps.js";
@@ -80,9 +81,21 @@ export function rankLiveStandings(
 
 export class LiveService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = prisma) {}
+  constructor(
+    private readonly db: any = prisma,
+    private readonly redis: IRedisCacheClient | null = db === prisma ? getRedisClient() : null
+  ) {}
 
   public async getLeagueSnapshot(leagueId: string): Promise<LiveSnapshot | null> {
+    const cacheKey = `live:bps:snapshot:${leagueId}`;
+    if (this.redis) {
+      try {
+        const cached = await this.redis.get(cacheKey);
+        if (cached) return JSON.parse(cached) as LiveSnapshot;
+      } catch {
+        // Redis is an optimization; compute the snapshot directly when unavailable.
+      }
+    }
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
@@ -195,7 +208,7 @@ export class LiveService {
       minutes: stat.minutes,
     })));
 
-    return {
+    const snapshot: LiveSnapshot = {
       leagueId: league.id,
       gameweek: gameweek ? { id: gameweek.id, name: gameweek.name } : null,
       fixtures: fixtures.map((f: any) => ({
@@ -231,6 +244,14 @@ export class LiveService {
       standings: rankLiveStandings(entries),
       generatedAt: new Date().toISOString(),
     };
+    if (this.redis) {
+      try {
+        await this.redis.set(cacheKey, JSON.stringify(snapshot), "PX", 900);
+      } catch {
+        // A cache write failure must not interrupt live updates.
+      }
+    }
+    return snapshot;
   }
 }
 

@@ -87,5 +87,20 @@ describe("PrizeService Deterministic Calculations", () => {
     assert.equal(Math.round(result.payouts.reduce((sum, value) => sum + value, 0) * 100), Math.round(result.prizePool * 100));
     assert.throws(() => PrizeService.encodeSorobanDistribution([10001]), /totaling 10000/);
     assert.throws(() => PrizeService.encodeSorobanDistribution([-1, 10001]), /non-negative/);
+    assert.deepEqual(PrizeService.encodeSorobanPayoutAmounts([4.32, 4.32], 8.64), [5000, 5000]);
+  });
+
+  it("conserves randomized odd-cent pools and encodes them for Soroban", () => {
+    let seed = 0x51f15e;
+    for (let iteration = 0; iteration < 10_000; iteration++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const participantCount = 3 + seed % 98;
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const entryFee = (1 + (seed % 100_000)) / 100;
+      const distribution = PrizeService.calculatePrizeDistribution(participantCount, entryFee, { preset: "custom", customSplitsBps: [5000, 3000, 2000] });
+      const totalCents = Math.round(distribution.payouts.reduce((sum, amount) => sum + amount, 0) * 100);
+      assert.equal(totalCents, Math.round(distribution.prizePool * 100));
+      assert.equal(PrizeService.encodeSorobanPayoutAmounts(distribution.payouts, distribution.prizePool).reduce((sum, value) => sum + value, 0), 10_000);
+    }
   });
 });

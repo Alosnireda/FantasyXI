@@ -42,7 +42,7 @@ describe("Live Matchday Feed", () => {
       minutes: 90,
       totalPoints: sp.playerId === 109 ? 10 : 2,
       goals: sp.playerId === 109 ? 1 : 0,
-      assists: 0, yellowCards: 0, redCards: 0, saves: 0, bonus: 0,
+      assists: 0, yellowCards: 0, redCards: 0, saves: 0, bps: sp.playerId === 109 ? 29 : 0, bonus: 0,
       player: { displayName: `P${sp.playerId}`, team: { shortName: "ARS" } },
     }));
     const db: any = {
@@ -82,6 +82,8 @@ describe("Live Matchday Feed", () => {
 
     assert.equal(snapshot.fixtures[0].minutes, 63);
     assert.deepEqual(snapshot.events.map((e) => [e.playerName, e.goals]), [["P109", 1]]);
+    assert.equal(snapshot.events[0].bps, 29);
+    assert.equal(snapshot.events[0].provisionalBonus, 3);
   });
 
   it("returns null for an unknown league", async () => {

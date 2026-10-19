@@ -26,6 +26,28 @@ export class PrizeService {
     return [...splitsBps];
   }
 
+  /** Derive on-chain weights for an already tie-adjusted, exact-cent payout list. */
+  public static encodeSorobanPayoutAmounts(payouts: number[], prizePool: number): number[] {
+    const poolCents = Math.round(prizePool * 100);
+    const payoutCents = payouts.map((amount) => Math.round(amount * 100));
+    if (poolCents <= 0 || payoutCents.length === 0 || payoutCents.some((amount) => amount < 0) || payoutCents.reduce((sum, amount) => sum + amount, 0) !== poolCents) {
+      throw new Error("Payout amounts must exactly equal a positive net prize pool");
+    }
+    let remainingBps = 10_000;
+    const encoded = payoutCents.map((amount, index) => {
+      if (index === payoutCents.length - 1) return remainingBps;
+      const basisPoints = Math.ceil(amount * 10_000 / poolCents);
+      const representedCents = Math.floor(poolCents * basisPoints / 10_000);
+      if (representedCents !== amount || basisPoints > remainingBps) {
+        throw new Error("Tie-adjusted payouts cannot be represented by Soroban basis points");
+      }
+      remainingBps -= basisPoints;
+      return basisPoints;
+    });
+    this.validateSplits(encoded);
+    return encoded;
+  }
+
   public static validateSplits(splitsBps: number[]): void {
     if (
       splitsBps.length === 0 ||

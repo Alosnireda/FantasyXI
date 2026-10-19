@@ -433,6 +433,7 @@ impl FantasyXIEscrow {
             0,
             None,
             None,
+            None,
         )
     }
 
@@ -458,6 +459,7 @@ impl FantasyXIEscrow {
             0,
             Some(proof),
             None,
+            None,
         )
     }
 
@@ -478,6 +480,7 @@ impl FantasyXIEscrow {
             platform_fee,
             None,
             0,
+            None,
             None,
             None,
         )
@@ -502,6 +505,7 @@ impl FantasyXIEscrow {
             None,
             0,
             Some(proof),
+            None,
             None,
         )
     }
@@ -528,6 +532,7 @@ impl FantasyXIEscrow {
             platform_fee,
             affiliate_address,
             affiliate_cut,
+            None,
             None,
             None,
         )
@@ -575,6 +580,7 @@ impl FantasyXIEscrow {
             0,
             None,
             Some(settlement_hash),
+            None,
         )
     }
 
@@ -599,6 +605,38 @@ impl FantasyXIEscrow {
             0,
             None,
             Some(settlement_hash),
+            None,
+        )
+    }
+
+    /// Admin settles a league using rank weights in basis points.
+    /// The final winner receives the remainder so no stroops are lost.
+    pub fn settle_with_distribution(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+        distribution_bps: Vec<u32>,
+    ) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::settle_internal(
+            env,
+            approvals,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+            None,
+            0,
+            None,
+            None,
+            Some(distribution_bps),
         )
     }
 
@@ -613,6 +651,7 @@ impl FantasyXIEscrow {
         affiliate_cut: i128,
         proof: Option<BytesN<32>>,
         settlement_hash: Option<BytesN<32>>,
+        distribution_bps: Option<Vec<u32>>,
     ) -> Result<(), EscrowError> {
         Self::authorize_signers(&env, &approvals)?;
 
@@ -676,7 +715,34 @@ impl FantasyXIEscrow {
         let prize_pool = league.total_deposited - platform_fee;
         let mut expected_payouts = Vec::new(&env);
         let mut tied_first_payouts = Vec::new(&env);
-        if winners.len() == 1 {
+        if let Some(ref splits_bps) = distribution_bps {
+            if splits_bps.len() != winners.len() || splits_bps.is_empty() {
+                return Err(EscrowError::InvalidPrizeDistribution);
+            }
+            let mut total_bps = 0_u32;
+            for basis_points in splits_bps.iter() {
+                if basis_points > 10_000 {
+                    return Err(EscrowError::InvalidPrizeDistribution);
+                }
+                total_bps = total_bps.saturating_add(basis_points);
+            }
+            if total_bps != 10_000 {
+                return Err(EscrowError::InvalidPrizeDistribution);
+            }
+            let mut remaining = prize_pool;
+            for (index, basis_points) in splits_bps.iter().enumerate() {
+                let amount = if index + 1 == splits_bps.len() as usize {
+                    remaining
+                } else {
+                    let pool_cents = prize_pool / 100_000;
+                    let share_cents = (pool_cents * (basis_points as i128)) / 10_000;
+                    let share = share_cents * 100_000;
+                    remaining -= share;
+                    share
+                };
+                expected_payouts.push_back(amount);
+            }
+        } else if winners.len() == 1 {
             expected_payouts.push_back(prize_pool);
         } else if winners.len() == 2 {
             let p1 = (prize_pool * 70) / 100;
@@ -1509,6 +1575,65 @@ mod test {
         // Double settlement must fail
         let result = client.try_settle(&admin, &200, &winners, &treasury, &5_000_000);
         assert_eq!(result, Err(Ok(EscrowError::AlreadySettled)));
+    }
+
+    #[test]
+    fn test_custom_basis_point_distribution_settles_without_precision_loss() {
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+        let users = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let treasury = Address::generate(&env);
+        for user in users.iter() {
+            token_admin_client.mint(user, &50_000_000);
+        }
+        client.create_league(&admin, &202, &50_000_000, &token_addr);
+        for user in users.iter() {
+            client.deposit(user, &202);
+        }
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: users[0].clone(),
+                amount: 71_200_000,
+            },
+            WinnerPayout {
+                winner: users[1].clone(),
+                amount: 42_700_000,
+            },
+            WinnerPayout {
+                winner: users[2].clone(),
+                amount: 28_600_000,
+            },
+        ];
+        client.settle_with_distribution(
+            &admin,
+            &202,
+            &winners,
+            &treasury,
+            &7_500_000,
+            &vec![&env, 5000, 3000, 2000],
+        );
+
+        client.create_league(&admin, &203, &50_000_000, &token_addr);
+        for user in users.iter() {
+            token_admin_client.mint(user, &50_000_000);
+            client.deposit(user, &203);
+        }
+        let invalid = client.try_settle_with_distribution(
+            &admin,
+            &203,
+            &winners,
+            &treasury,
+            &7_500_000,
+            &vec![&env, 5000, 3000, 1000],
+        );
+        assert_eq!(invalid, Err(Ok(EscrowError::InvalidPrizeDistribution)));
+        let contract = token::Client::new(&env, &token_addr);
+        assert_eq!(contract.balance(&treasury), 7_500_000);
     }
 
     #[test]
