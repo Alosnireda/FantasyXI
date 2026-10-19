@@ -7,8 +7,12 @@ import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
 import {
   enqueueSquadMutation,
+  getQueuedMutations,
   getQueuedMutationCount,
+  removeQueuedMutation,
   syncQueuedMutations,
+  updateQueuedMutationRevision,
+  type QueuedSquadMutation,
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
@@ -65,6 +69,8 @@ export default function TeamPage() {
   const isOnline = useOnlineStatus();
   const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
   const [queuedMutationsCount, setQueuedMutationsCount] = useState<number>(0);
+  const [squadRevision, setSquadRevision] = useState<string | undefined>();
+  const [conflictMutation, setConflictMutation] = useState<QueuedSquadMutation | null>(null);
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
   const showingSnapshot = useRef(false);
   const prevOnlineRef = useRef(isOnline);
@@ -73,8 +79,9 @@ export default function TeamPage() {
   // Refresh queued mutations count
   const refreshQueueCount = async () => {
     try {
-      const count = await getQueuedMutationCount();
+      const [count, queued] = await Promise.all([getQueuedMutationCount(), getQueuedMutations()]);
       setQueuedMutationsCount(count);
+      setConflictMutation(queued.find((mutation) => mutation.status === "conflict") ?? null);
     } catch {
       // Ignore in unsupported environments
     }
@@ -86,6 +93,11 @@ export default function TeamPage() {
     try {
       const res = await syncQueuedMutations();
       await refreshQueueCount();
+      if (res.conflicts.length > 0) {
+        const queued = await getQueuedMutations();
+        setConflictMutation(queued.find((mutation) => mutation.id === res.conflicts[0].id) ?? null);
+        toast.info("An offline lineup edit conflicts with the latest server version. Choose how to resolve it below.");
+      }
       if (res.succeeded > 0) {
         const msg = isAuto
           ? `Auto-synced ${res.succeeded} squad update(s) to server!`
@@ -100,6 +112,21 @@ export default function TeamPage() {
     } finally {
       setIsSyncingOfflineQueue(false);
     }
+  };
+
+  const useServerSquadVersion = async () => {
+    if (!conflictMutation) return;
+    await removeQueuedMutation(conflictMutation.id);
+    setConflictMutation(null);
+    await refreshQueueCount();
+    window.location.reload();
+  };
+
+  const keepOfflineSquadVersion = async () => {
+    if (!conflictMutation?.serverRevision) return;
+    await updateQueuedMutationRevision(conflictMutation.id, conflictMutation.serverRevision);
+    setConflictMutation(null);
+    await handleManualSync(false);
   };
 
   // Listen to queue changes, SW messages, and register SW
@@ -163,6 +190,7 @@ export default function TeamPage() {
       const s = squads[0];
       setSquadId(s.id);
       setSquadName(s.name);
+      setSquadRevision(s.updatedAt);
 
       if (s.players && s.players.length > 0) {
         const mapped: LocalSquadPlayer[] = s.players
@@ -523,6 +551,7 @@ export default function TeamPage() {
           userId,
           action: squadId ? "update" : "create",
           payload,
+          baseRevision: squadRevision,
         });
 
         // Also update local snapshot so the squad stays visible offline
@@ -573,7 +602,11 @@ export default function TeamPage() {
         // Optimistic update: assume success, rollback on failure
         let rollback = false;
         try {
-          await api.put(`/api/v1/squads/${squadId}`, payload);
+          const response = await api.put<{ success: boolean; data: Squad }>(`/api/v1/squads/${squadId}`, {
+            ...payload,
+            expectedUpdatedAt: squadRevision,
+          });
+          setSquadRevision(response.data.updatedAt);
           const msg = "Squad lineup and tactics updated successfully!";
           setSaveSuccessMsg(msg);
           toast.success(msg);
@@ -782,18 +815,53 @@ export default function TeamPage() {
             <div className="flex items-center gap-3">
               <IconAlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
               <span className="font-semibold">
-                {`Offline: ${queuedMutationsCount} change${queuedMutationsCount === 1 ? "" : "s"} queued for sync`}
+                {conflictMutation
+                  ? "An offline lineup edit needs conflict resolution"
+                  : `${queuedMutationsCount} squad change${queuedMutationsCount === 1 ? "" : "s"} queued for sync`}
               </span>
             </div>
             <button
               type="button"
               onClick={() => handleManualSync(false)}
-              disabled={isSyncingOfflineQueue || !isOnline}
+              disabled={isSyncingOfflineQueue || !isOnline || Boolean(conflictMutation)}
               className="px-3 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold uppercase tracking-wider text-[11px] transition-all disabled:opacity-50 flex items-center gap-1.5 self-start sm:self-auto cursor-pointer disabled:cursor-not-allowed"
             >
               {isSyncingOfflineQueue ? "Syncing..." : "Sync Now"}
             </button>
           </div>
+        )}
+
+        {conflictMutation && (
+          <section
+            role="alertdialog"
+            aria-labelledby="offline-conflict-title"
+            aria-describedby="offline-conflict-description"
+            className="rounded-xl border border-amber-500/50 bg-amber-950/70 p-5 space-y-3"
+            data-testid="offline-conflict-dialog"
+          >
+            <h2 id="offline-conflict-title" className="text-sm font-bold text-amber-100">Your squad changed elsewhere</h2>
+            <p id="offline-conflict-description" className="text-xs text-amber-200">
+              Another update reached the server while this device was offline. Use the current server squad or retry your lineup against its latest revision.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={useServerSquadVersion}
+                disabled={!isOnline}
+                className="rounded-md bg-slate-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+              >
+                Use server version
+              </button>
+              <button
+                type="button"
+                onClick={keepOfflineSquadVersion}
+                disabled={!isOnline || !conflictMutation.serverRevision}
+                className="rounded-md bg-amber-500/20 px-3 py-2 text-xs font-bold text-amber-100 disabled:opacity-50"
+              >
+                Keep my offline changes
+              </button>
+            </div>
+          </section>
         )}
 
         {/* Offline mode: read-only view of the squad saved on this device */}

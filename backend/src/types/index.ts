@@ -202,6 +202,7 @@ export interface CreateSquadInput {
 export interface UpdateSquadInput {
   name?: string;
   players: SquadPlayerSelection[];
+  expectedUpdatedAt?: string;
 }
 
 export interface PlayerFilterQuery {
