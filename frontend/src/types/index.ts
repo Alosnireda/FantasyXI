@@ -234,6 +234,8 @@ export type LeagueInvitationState = "ACTIVE" | "USED" | "REVOKED" | "EXPIRED";
 export interface LeagueInvitation {
   id: string;
   expiresAt: string;
+  maxUses: number;
+  usesCount: number;
   usedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
@@ -247,6 +249,8 @@ export interface CreatedLeagueInvitation {
   leagueId: string;
   token: string;
   expiresAt: string;
+  maxUses: number;
+  usesCount: number;
   createdAt: string;
 }
 
