@@ -45,10 +45,10 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
+    HashMismatch = 27,
+    TimelockActive = 28,
+    ProposalNotFound = 29,
+    AlreadyApproved = 30,
     ProposalExecuted = 26,
 }
 
@@ -1415,6 +1415,7 @@ impl FantasyXIEscrow {
 #[cfg(test)]
 mod test {
     use super::*;
+    use proptest::prelude::*;
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         vec, Env,
@@ -2426,6 +2427,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2543,5 +2547,69 @@ mod test {
 
         let re_approve = client.try_approve_fee_withdrawal(&signer_three, &proposal_id);
         assert_eq!(re_approve, Err(Ok(EscrowError::ProposalExecuted)));
+    }
+
+    #[test]
+    fn fuzz_multisig_signer_combinations() {
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(1));
+        let strategy = prop::collection::vec(prop::collection::vec(0u8..5, 0..5), 10_000);
+        runner
+            .run(&strategy, |cases| {
+                let env = Env::default();
+                env.mock_all_auths();
+                let signers = vec![
+                    &env,
+                    Address::generate(&env),
+                    Address::generate(&env),
+                    Address::generate(&env),
+                ];
+                let unknown = [Address::generate(&env), Address::generate(&env)];
+                let contract_id = env.register(FantasyXIEscrow, ());
+                env.as_contract(&contract_id, || {
+                    env.storage().instance().set(
+                        &DataKey::AdminConfig,
+                        &AdminConfig {
+                            signers: signers.clone(),
+                            threshold: 2,
+                        },
+                    );
+                });
+
+                for indices in cases {
+                    let mut approvals = Vec::new(&env);
+                    for index in &indices {
+                        approvals.push_back(if *index < 3 {
+                            signers.get(*index as u32).unwrap()
+                        } else {
+                            unknown[(*index - 3) as usize].clone()
+                        });
+                    }
+                    let mut expected = Ok(());
+                    if indices.len() < 2 || indices.len() > 3 {
+                        expected = Err(EscrowError::InvalidMultisig);
+                    } else {
+                        for (position, index) in indices.iter().enumerate() {
+                            if indices
+                                .iter()
+                                .take(position)
+                                .any(|previous| previous == index)
+                            {
+                                expected = Err(EscrowError::InvalidMultisig);
+                                break;
+                            }
+                            if *index >= 3 {
+                                expected = Err(EscrowError::NotAuthorized);
+                                break;
+                            }
+                        }
+                    }
+                    let actual = env.as_contract(&contract_id, || {
+                        FantasyXIEscrow::authorize_signers(&env, &approvals)
+                    });
+                    prop_assert_eq!(actual, expected);
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 }
