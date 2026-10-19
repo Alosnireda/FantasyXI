@@ -278,6 +278,7 @@ export interface LeagueMember {
 
 export interface LeagueStandingsEntry {
   rank: number;
+  rankChange?: number | null;
   userId: string;
   username: string;
   squadId: string;
@@ -329,9 +330,11 @@ export interface GameweekPerformance {
   gameweekName: string;
   deadline: string;
   points: number;
+  rank: number | null;
   benchPoints: number;
   captainPoints: number;
   transferCost: number;
+  transferCount: number;
   cumulativePoints: number;
   rollingAverage: number;
   /** Mean score of every squad on the platform that gameweek */

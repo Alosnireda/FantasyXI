@@ -18,9 +18,9 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import {
-  getHorizonServer,
   getSorobanRpcServer,
   stellarConfig,
+  withHorizonFailover,
 } from "../../config/stellar.js";
 import { PaymentVerificationResult } from "../../types/index.js";
 import {
@@ -67,7 +67,7 @@ export const ESCROW_EVENT_TOPICS = [
 ] as const;
 
 export class StellarService {
-  private server: Horizon.Server;
+  private customServer?: Horizon.Server;
   private sorobanClient?: SorobanContractClient;
   private rpcServer?: rpc.Server;
 
@@ -76,9 +76,13 @@ export class StellarService {
     customSorobanClient?: SorobanContractClient,
     customRpcServer?: rpc.Server
   ) {
-    this.server = customServer || getHorizonServer();
+    this.customServer = customServer;
     this.sorobanClient = customSorobanClient;
     this.rpcServer = customRpcServer;
+  }
+
+  private runHorizon<T>(operation: (server: Horizon.Server) => Promise<T>): Promise<T> {
+    return this.customServer ? operation(this.customServer) : withHorizonFailover(operation);
   }
 
   private getRpcServer(): rpc.Server {
@@ -188,7 +192,9 @@ export class StellarService {
 
     try {
       // 1. Fetch transaction record from Horizon
-      const tx = await this.server.transactions().transaction(txHash).call();
+      const tx = await this.runHorizon((server) =>
+        server.transactions().transaction(txHash).call()
+      );
 
       if (!tx.successful) {
         return {
@@ -362,10 +368,9 @@ export class StellarService {
       }
 
       // Fetch operations for this transaction
-      const opsPage = await this.server
-        .operations()
-        .forTransaction(txHash)
-        .call();
+      const opsPage = await this.runHorizon((server) =>
+        server.operations().forTransaction(txHash).call()
+      );
 
       // Find payment operation matching criteria
       const matchingOp = opsPage.records.find((op: any) => {
@@ -453,7 +458,7 @@ export class StellarService {
     }
 
     try {
-      const account = await this.server.loadAccount(stellarAddress);
+      const account = await this.runHorizon((server) => server.loadAccount(stellarAddress));
       const usdcBalance = account.balances.find((b: any) => {
         if (assetCode === "XLM") return b.asset_type === "native";
         return b.asset_code === assetCode && b.asset_issuer === assetIssuer;

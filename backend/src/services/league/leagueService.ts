@@ -863,7 +863,7 @@ export class LeagueService {
    * 2. Highest Single Gameweek Score in that window (descending)
    * 3. Earliest joined timestamp (ascending)
    */
-  public async getLeagueStandings(leagueId: string): Promise<{
+  public async getLeagueStandings(leagueId: string, gameweekId?: number): Promise<{
     league: {
       id: string;
       name: string;
@@ -874,9 +874,10 @@ export class LeagueService {
       endGameweek: { id: number; name: string };
     };
     standings: LeagueStandingsEntry[];
+    completedGameweeks: Array<{ id: number; name: string }>;
     prizeDistribution: ReturnType<typeof PrizeService.calculatePrizeDistribution>;
   }> {
-    const league = await prisma.league.findUnique({
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
         startGameweek: true,
@@ -894,15 +895,31 @@ export class LeagueService {
       throw new LeagueNotFoundError(leagueId);
     }
 
-    const squadIds = league.members.map((m) => m.squadId);
+    const completedGameweeks = await this.db.gameweek.findMany({
+      where: {
+        id: { gte: league.startGameweekId, lte: league.endGameweekId },
+        isFinished: true,
+      },
+      select: { id: true, name: true },
+      orderBy: { id: "asc" },
+    });
+    if (gameweekId !== undefined && !completedGameweeks.some((gameweek: { id: number }) => gameweek.id === gameweekId)) {
+      throw new LeagueValidationError("The selected gameweek is not completed or is outside this league.");
+    }
 
-    // Fetch all gameweek scores within the competition window [startGameweekId, endGameweekId]
-    const gameweekScores = await prisma.squadGameweekScore.findMany({
+    const squadIds = league.members.map((m: { squadId: string }) => m.squadId);
+    const previousGameweekId = gameweekId === undefined
+      ? undefined
+      : completedGameweeks.filter((gameweek: { id: number }) => gameweek.id < gameweekId).at(-1)?.id;
+
+    // Only completed league weeks are shown in the time machine. The default
+    // response keeps the existing full-window standings behavior.
+    const gameweekScores = await this.db.squadGameweekScore.findMany({
       where: {
         squadId: { in: squadIds },
         gameweekId: {
           gte: league.startGameweekId,
-          lte: league.endGameweekId,
+          lte: gameweekId ?? league.endGameweekId,
         },
       },
       include: {
@@ -926,46 +943,62 @@ export class LeagueService {
       scoresBySquad.set(score.squadId, list);
     }
 
-    // Build standings items
-    const rawEntries = league.members.map((m) => {
-      const scores = scoresBySquad.get(m.squadId) || [];
-      const totalPoints = scores.reduce((sum, s) => sum + s.points, 0);
-      const bestGameweekPoints = scores.length > 0
-        ? Math.max(...scores.map((s) => s.points))
-        : 0;
+    type RankedStandings = {
+      rank: number;
+      userId: string;
+      username: string;
+      squadId: string;
+      squadName: string;
+      membershipStatus: MembershipStatus;
+      totalPoints: number;
+      bestGameweekPoints: number;
+      gameweekScores: Array<{ gameweekId: number; gameweekName: string; points: number }>;
+      joinedAt: Date;
+    };
+    const rankAt = (throughGameweekId?: number): RankedStandings[] => {
+      const entries = league.members.map((member: {
+        userId: string;
+        squadId: string;
+        user: { username: string };
+        squad: { name: string };
+        status: MembershipStatus;
+        joinedAt: Date;
+      }) => {
+        const scores = (scoresBySquad.get(member.squadId) || []).filter(
+          (score) => throughGameweekId === undefined || score.gameweekId <= throughGameweekId
+        );
+        return {
+          userId: member.userId,
+          username: member.user.username,
+          squadId: member.squadId,
+          squadName: member.squad.name,
+          membershipStatus: member.status,
+          totalPoints: scores.reduce((sum, score) => sum + score.points, 0),
+          bestGameweekPoints: scores.length > 0
+            ? Math.max(...scores.map((score) => score.points))
+            : 0,
+          gameweekScores: scores.sort((a, b) => a.gameweekId - b.gameweekId),
+          joinedAt: member.joinedAt,
+        };
+      });
+      entries.sort((a: Omit<RankedStandings, "rank">, b: Omit<RankedStandings, "rank">) =>
+        b.totalPoints - a.totalPoints ||
+        b.bestGameweekPoints - a.bestGameweekPoints ||
+        a.joinedAt.getTime() - b.joinedAt.getTime()
+      );
+      return entries.map((entry: Omit<RankedStandings, "rank">, index: number) => ({ rank: index + 1, ...entry }));
+    };
 
+    const previousRanks = previousGameweekId === undefined
+      ? new Map<string, number>()
+      : new Map<string, number>(rankAt(previousGameweekId).map((entry) => [entry.userId, entry.rank]));
+    const standings: LeagueStandingsEntry[] = rankAt().map((entry: RankedStandings) => {
+      const previousRank = previousRanks.get(entry.userId);
       return {
-        userId: m.userId,
-        username: m.user.username,
-        squadId: m.squadId,
-        squadName: m.squad.name,
-        membershipStatus: m.status,
-        totalPoints,
-        bestGameweekPoints,
-        gameweekScores: scores.sort((a, b) => a.gameweekId - b.gameweekId),
-        joinedAt: m.joinedAt,
+        ...entry,
+        rankChange: previousRank === undefined ? null : previousRank - entry.rank,
       };
     });
-
-    // Deterministic Sort
-    rawEntries.sort((a, b) => {
-      // 1. Total Points (descending)
-      if (b.totalPoints !== a.totalPoints) {
-        return b.totalPoints - a.totalPoints;
-      }
-      // 2. Highest Single Gameweek Score (descending)
-      if (b.bestGameweekPoints !== a.bestGameweekPoints) {
-        return b.bestGameweekPoints - a.bestGameweekPoints;
-      }
-      // 3. Earliest Join Date (ascending)
-      return a.joinedAt.getTime() - b.joinedAt.getTime();
-    });
-
-    // Assign sequential ranks
-    const standings: LeagueStandingsEntry[] = rawEntries.map((entry, idx) => ({
-      rank: idx + 1,
-      ...entry,
-    }));
 
     const prizeDistribution = PrizeService.calculatePrizeDistribution(
       league.currentMembers,
@@ -989,6 +1022,7 @@ export class LeagueService {
         },
       },
       standings,
+      completedGameweeks,
       prizeDistribution,
     };
   }

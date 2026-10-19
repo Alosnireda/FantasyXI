@@ -290,6 +290,7 @@ export interface JoinLeagueInput {
 
 export interface LeagueStandingsEntry {
   rank: number;
+  rankChange?: number | null;
   userId: string;
   username: string;
   squadId: string;

@@ -234,13 +234,25 @@ export async function getLeagueStandings(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const standingsData = await leagueService.getLeagueStandings(id as string);
+    const rawGameweekId = req.query.gameweekId;
+    if (rawGameweekId !== undefined && (typeof rawGameweekId !== "string" || !/^\d+$/.test(rawGameweekId))) {
+      res.status(400).json({ success: false, message: "gameweekId must be a positive integer" });
+      return;
+    }
+    const standingsData = await leagueService.getLeagueStandings(
+      id as string,
+      rawGameweekId === undefined ? undefined : Number(rawGameweekId)
+    );
 
     res.json({
       success: true,
       data: standingsData,
     });
   } catch (error) {
+    if (error instanceof LeagueValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
     if (error instanceof LeagueNotFoundError) {
       res.status(404).json({
         success: false,
