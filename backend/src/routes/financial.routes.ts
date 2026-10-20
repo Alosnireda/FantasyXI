@@ -9,6 +9,13 @@ import {
   executeSettlement,
   reconcileLeague,
   getAffiliateDashboard,
+  fileDisputeHandler,
+  getLeagueDisputesHandler,
+  addEvidenceHandler,
+  resolveDisputePayoutHandler,
+  resolveDisputeRefundHandler,
+  rejectDisputeHandler,
+  executeMerkleSettlementHandler,
 } from "../controllers/financial.controller.js";
 import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
@@ -47,5 +54,16 @@ router.post("/reconcile-deposit", mutationRateLimiter, requirePermission(Permiss
 // Reconciliation exposes sensitive league financial reports and requires the
 // financial:reconcile permission (ADMIN, MODERATOR and SERVICE roles).
 router.get("/reconcile", requirePermission(Permission.FINANCIAL_RECONCILE), reconcileLeague);
+
+// Merkle tree settlement
+router.post("/merkle-settle", requireRole(UserRole.ADMIN), executeMerkleSettlementHandler);
+
+// Payment dispute workflows & automated escrow freezes
+router.post("/disputes", mutationRateLimiter, fileDisputeHandler);
+router.get("/disputes", getLeagueDisputesHandler);
+router.post("/disputes/:disputeId/evidence", mutationRateLimiter, addEvidenceHandler);
+router.post("/disputes/:disputeId/resolve-payout", requireRole(UserRole.ADMIN), resolveDisputePayoutHandler);
+router.post("/disputes/:disputeId/resolve-refund", requireRole(UserRole.ADMIN), resolveDisputeRefundHandler);
+router.post("/disputes/:disputeId/reject", requireRole(UserRole.ADMIN), rejectDisputeHandler);
 
 export default router;

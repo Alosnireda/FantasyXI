@@ -1,5 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
+
+#[cfg(test)]
+extern crate std;
+#[cfg(test)]
+extern crate self as fantasyxi_escrow;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
@@ -45,11 +50,13 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
+    LeagueFrozen = 31,
+    DisputeActive = 32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +121,10 @@ pub enum DataKey {
     ParticipantPage(u64, u32),
     SettlementHash(u64),
     TimelockProposal(u64),
+    LeagueFrozen(u64),
+    MerkleRoot(u64),
+    Claimed(u64, Address),
+    DisputeReason(u64),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -128,6 +139,13 @@ impl FantasyXIEscrow {
         env.storage()
             .instance()
             .get(&DataKey::IsPaused)
+            .unwrap_or(false)
+    }
+
+    fn is_league_frozen_internal(env: &Env, league_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LeagueFrozen(league_id))
             .unwrap_or(false)
     }
 
@@ -652,6 +670,10 @@ impl FantasyXIEscrow {
             return Err(EscrowError::AlreadySettled);
         }
 
+        if Self::is_league_frozen_internal(&env, league_id) {
+            return Err(EscrowError::ContractPaused);
+        }
+
         // Platform Fee Hard Cap check
         let max_fee = (league.total_deposited * 500) / 10000;
         if platform_fee > max_fee {
@@ -854,12 +876,25 @@ impl FantasyXIEscrow {
             .persistent()
             .get(&league_key)
             .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        if Self::is_league_frozen_internal(&env, league_id) {
+            return Err(EscrowError::ContractPaused);
+        }
+
         let deposit_key = DataKey::Deposit(league_id, participant.clone());
         let amount: i128 = env
             .storage()
             .persistent()
             .get(&deposit_key)
             .ok_or(EscrowError::NoDeposit)?;
+
+        if amount <= 0 {
+            return Err(EscrowError::NoDeposit);
+        }
 
         if amount > 0 {
             token::Client::new(&env, &league.asset).transfer(
@@ -1104,6 +1139,10 @@ impl FantasyXIEscrow {
     pub fn claim_prize(env: Env, winner: Address, league_id: u64) -> Result<(), EscrowError> {
         winner.require_auth();
 
+        if Self::is_league_frozen_internal(&env, league_id) {
+            return Err(EscrowError::ContractPaused);
+        }
+
         let claim_key = DataKey::ClaimablePrize(league_id, winner.clone());
         let amount: i128 = env
             .storage()
@@ -1133,6 +1172,284 @@ impl FantasyXIEscrow {
             .publish((symbol_short!("claimed"), league_id), (winner, amount));
 
         Ok(())
+    }
+
+    /// Admin settles the league using an off-chain computed Merkle root.
+    /// This stores a 32-byte cryptographic root on-chain, enabling winners
+    /// to claim their prizes individually with Merkle branch proofs.
+    pub fn settle_with_merkle_root(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        merkle_root: BytesN<32>,
+        total_prize_pool: i128,
+        platform_treasury: Address,
+        platform_fee: i128,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
+
+        if Self::is_league_frozen_internal(&env, league_id) {
+            return Err(EscrowError::ContractPaused);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Cancelled {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        let max_fee = (league.total_deposited * 500) / 10000;
+        if platform_fee > max_fee || platform_fee < 0 {
+            return Err(EscrowError::FeeExceedsMaxCap);
+        }
+
+        if total_prize_pool < 0 || total_prize_pool + platform_fee != league.total_deposited {
+            return Err(EscrowError::PayoutExceedsDeposits);
+        }
+
+        let token_client = token::Client::new(&env, &league.asset);
+        if platform_fee > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &platform_treasury,
+                &platform_fee,
+            );
+        }
+
+        let root_key = DataKey::MerkleRoot(league_id);
+        env.storage().persistent().set(&root_key, &merkle_root);
+        env.storage().persistent().extend_ttl(
+            &root_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::Settled;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        env.events().publish(
+            (symbol_short!("m_settle"), league_id),
+            (merkle_root, total_prize_pool),
+        );
+
+        Ok(())
+    }
+
+    /// Winner claims their prize using a cryptographic Merkle branch proof.
+    pub fn claim_prize_merkle(
+        env: Env,
+        league_id: u64,
+        winner: Address,
+        amount: i128,
+        merkle_proof: Vec<BytesN<32>>,
+    ) -> Result<(), EscrowError> {
+        winner.require_auth();
+
+        if amount <= 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+
+        if Self::is_league_frozen_internal(&env, league_id) {
+            return Err(EscrowError::ContractPaused);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status != LeagueStatus::Settled {
+            return Err(EscrowError::NoClaimablePrize);
+        }
+
+        let claimed_key = DataKey::Claimed(league_id, winner.clone());
+        if env.storage().persistent().has(&claimed_key) {
+            return Err(EscrowError::AlreadyClaimed);
+        }
+
+        let root_key = DataKey::MerkleRoot(league_id);
+        let stored_root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&root_key)
+            .ok_or(EscrowError::NoClaimablePrize)?;
+
+        // Compute leaf: sha256( league_id.to_xdr() + winner.to_xdr() + amount.to_xdr() )
+        let mut leaf_bytes = Bytes::new(&env);
+        leaf_bytes.append(&league_id.to_xdr(&env));
+        leaf_bytes.append(&winner.clone().to_xdr(&env));
+        leaf_bytes.append(&amount.to_xdr(&env));
+        let mut current_hash = env.crypto().sha256(&leaf_bytes).to_bytes();
+
+        // Verify Merkle branch proof
+        for sibling in merkle_proof.iter() {
+            let mut pair_bytes = Bytes::new(&env);
+            if current_hash <= sibling {
+                pair_bytes.append(&Bytes::from_array(&env, &current_hash.to_array()));
+                pair_bytes.append(&Bytes::from_array(&env, &sibling.to_array()));
+            } else {
+                pair_bytes.append(&Bytes::from_array(&env, &sibling.to_array()));
+                pair_bytes.append(&Bytes::from_array(&env, &current_hash.to_array()));
+            }
+            current_hash = env.crypto().sha256(&pair_bytes).to_bytes();
+        }
+
+        if current_hash != stored_root {
+            return Err(EscrowError::InvalidProof);
+        }
+
+        // Mark claimed to strictly prevent double-claiming
+        env.storage().persistent().set(&claimed_key, &true);
+        env.storage().persistent().extend_ttl(
+            &claimed_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token_client = token::Client::new(&env, &league.asset);
+        token_client.transfer(&env.current_contract_address(), &winner, &amount);
+
+        env.events().publish(
+            (symbol_short!("m_claimed"), league_id),
+            (winner, amount),
+        );
+
+        Ok(())
+    }
+
+    /// Places an escrow league partition into a frozen hold during dispute investigation.
+    pub fn freeze_league(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        reason_hash: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+
+        let league_key = DataKey::League(league_id);
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Cancelled {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        let freeze_key = DataKey::LeagueFrozen(league_id);
+        env.storage().persistent().set(&freeze_key, &true);
+        env.storage().persistent().extend_ttl(
+            &freeze_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let reason_key = DataKey::DisputeReason(league_id);
+        env.storage().persistent().set(&reason_key, &reason_hash);
+        env.storage().persistent().extend_ttl(
+            &reason_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "LeagueFrozen"), league_id),
+            reason_hash,
+        );
+
+        Ok(())
+    }
+
+    /// Releases a frozen hold on a league partition once dispute investigation concludes.
+    pub fn unfreeze_league(env: Env, admin: Address, league_id: u64) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+
+        let freeze_key = DataKey::LeagueFrozen(league_id);
+        if !env.storage().persistent().has(&freeze_key) {
+            return Ok(());
+        }
+
+        env.storage().persistent().remove(&freeze_key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        env.events()
+            .publish((Symbol::new(&env, "LeagueUnfrozen"), league_id), admin);
+
+        Ok(())
+    }
+
+    pub fn is_league_frozen(env: Env, league_id: u64) -> bool {
+        Self::is_league_frozen_internal(&env, league_id)
+    }
+
+    pub fn get_merkle_root(env: Env, league_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerkleRoot(league_id))
+    }
+
+    pub fn is_prize_claimed(env: Env, league_id: u64, winner: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Claimed(league_id, winner))
+    }
+
+    /// Resolves dispute with decreed payout settlement, unfreezing contract atomically.
+    pub fn resolve_dispute_payout(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+        Self::settle(env, admin, league_id, winners, platform_treasury, platform_fee)
+    }
+
+    /// Resolves dispute with decreed proportional refund, unfreezing contract atomically.
+    pub fn resolve_dispute_refund(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        participants: Vec<Address>,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+        Self::refund(env, admin, league_id, participants)
     }
 
     /// Admin / Public endpoint to manually extend TTL of a league and instance
@@ -2426,6 +2743,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
