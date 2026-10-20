@@ -1,3 +1,6 @@
+import { eventFanout } from "./services/live/eventFanout.js";
+import { attachLiveSocketServer, LIVE_SOCKET_PATH } from "./realtime/liveSocketServer.js";
+import { initRedisChat } from "./services/chat/chatService.js";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -136,21 +139,12 @@ function startTransactionCoordinator(): void {
   }
 }
 
-async function startServer(): Promise<void> {
-  // The shared Redis client is lazy and has no offline queue, so commands sent
-  // while it is still connecting fail and fall back to per-node memory. Connect
-  // before serving so login-security state (issue #331) is shared across nodes.
-  const redis = getRedisClient();
-  if (redis?.status === "wait") {
-    await redis.connect().catch((error: Error) =>
-      console.warn(`[Redis] Initial connection failed; using in-memory fallbacks: ${error.message}`)
-    );
-  }
+let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
+let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
 
-  // Every node must hold the shared signing keys before it issues or verifies tokens (issue #332)
-  if (process.env.DATABASE_URL) {
-    await jwtKeyRotationService.start();
-  }
+async function startServer(): Promise<void> {
+  await eventFanout.start();
+  chatAdapter = await initRedisChat();
   await apolloServer.start();
   app.use(
     "/graphql",
@@ -200,8 +194,9 @@ async function startServer(): Promise<void> {
   });
 
   // Real-time league chat and user notifications share the HTTP server's port
-  chatSocketServer = attachChatSocketServer(httpServer, { passthroughPaths: [NOTIFICATION_SOCKET_PATH] });
+  chatSocketServer = attachChatSocketServer(httpServer, { passthroughPaths: [NOTIFICATION_SOCKET_PATH, LIVE_SOCKET_PATH] });
   notificationSocketServer = attachNotificationSocketServer(httpServer);
+  liveSocketServer = attachLiveSocketServer(httpServer);
   startTransactionCoordinator();
 }
 
@@ -218,6 +213,9 @@ process.on("SIGTERM", () => {
     .finally(() => chatSocketServer?.close())
     .finally(() => notificationSocketServer?.close())
     .finally(() => financialAuditLog.close())
+    .finally(() => liveSocketServer?.close())
+    .finally(() => chatAdapter?.close())
+    .finally(() => eventFanout.close())
     .finally(() => closeRedisClient())
     .finally(() => process.exit(0));
 });

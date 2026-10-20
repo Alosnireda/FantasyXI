@@ -6,6 +6,8 @@ import { apiRateLimiter } from "./middleware/rateLimiter.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { getJwks } from "./controllers/auth.controller.js";
 
+import { requestReadConsistency } from "./middleware/readConsistency.js";
+
 dotenv.config();
 
 const app = express();
@@ -22,6 +24,7 @@ app.use(
 );
 app.use(express.json());
 app.use(apiRateLimiter);
+app.use(requestReadConsistency);
 
 // Health check routes
 app.get("/", (_req: Request, res: Response) => {
