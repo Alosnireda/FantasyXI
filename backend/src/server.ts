@@ -11,7 +11,7 @@ import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
 import { prisma, getReadReplicaStatus } from "./config/db.js";
-import { closeRedisClient } from "./config/redis.js";
+import { closeRedisClient, getRedisClient } from "./config/redis.js";
 import { preferReplicaReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
@@ -26,6 +26,7 @@ import {
   CoordinatedTransactionStatus,
 } from "./services/financial/transactionCoordinatorService.js";
 import { financialService } from "./services/financial/financialService.js";
+import { jwtKeyRotationService } from "./services/auth/jwtKeyRotationService.js";
 
 dotenv.config();
 
@@ -136,6 +137,20 @@ function startTransactionCoordinator(): void {
 }
 
 async function startServer(): Promise<void> {
+  // The shared Redis client is lazy and has no offline queue, so commands sent
+  // while it is still connecting fail and fall back to per-node memory. Connect
+  // before serving so login-security state (issue #331) is shared across nodes.
+  const redis = getRedisClient();
+  if (redis?.status === "wait") {
+    await redis.connect().catch((error: Error) =>
+      console.warn(`[Redis] Initial connection failed; using in-memory fallbacks: ${error.message}`)
+    );
+  }
+
+  // Every node must hold the shared signing keys before it issues or verifies tokens (issue #332)
+  if (process.env.DATABASE_URL) {
+    await jwtKeyRotationService.start();
+  }
   await apolloServer.start();
   app.use(
     "/graphql",
@@ -199,6 +214,7 @@ process.on("SIGTERM", () => {
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => transactionCoordinator.stop())
+    .finally(() => jwtKeyRotationService.stop())
     .finally(() => chatSocketServer?.close())
     .finally(() => notificationSocketServer?.close())
     .finally(() => financialAuditLog.close())

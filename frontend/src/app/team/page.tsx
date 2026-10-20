@@ -5,11 +5,8 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
-import {
-  enqueueSquadMutation,
-  getQueuedMutationCount,
-  syncQueuedMutations,
-} from "@/lib/offlineQueue";
+import { getQueuedMutationCount, hasUnsyncedMutations } from "@/lib/offlineQueue";
+import { flushOfflineQueue } from "@/lib/offlineSyncCoordinator";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
 import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
@@ -39,7 +36,7 @@ import {
   DragOverlay,
 } from "@dnd-kit/core";
 
-import { useTeamStore, LocalSquadPlayer } from "@/store/teamStore";
+import { useTeamStore, LocalSquadPlayer, buildSquadPayload } from "@/store/teamStore";
 import { PlayerCard } from "@/components/pitch/PlayerCard";
 
 export default function TeamPage() {
@@ -55,7 +52,8 @@ export default function TeamPage() {
     activeDragPlayer, setActiveDragPlayer,
     substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
-    handleSwap, handleSetCaptain, handleSetViceCaptain
+    handleSwap, handleSetCaptain, handleSetViceCaptain,
+    setOwnerId, hydrateFromSquad, persistLineupOffline
   } = useTeamStore();
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -67,7 +65,6 @@ export default function TeamPage() {
   const [queuedMutationsCount, setQueuedMutationsCount] = useState<number>(0);
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
   const showingSnapshot = useRef(false);
-  const prevOnlineRef = useRef(isOnline);
   const userId = user?.id;
 
   // Refresh queued mutations count
@@ -80,21 +77,13 @@ export default function TeamPage() {
     }
   };
 
-  const handleManualSync = async (isAuto = false) => {
+  // Toasts, retries and conflict rollback are handled by the sync coordinator
+  const handleManualSync = async () => {
     if (isSyncingOfflineQueue) return;
     setIsSyncingOfflineQueue(true);
     try {
-      const res = await syncQueuedMutations();
+      await flushOfflineQueue();
       await refreshQueueCount();
-      if (res.succeeded > 0) {
-        const msg = isAuto
-          ? `Auto-synced ${res.succeeded} squad update(s) to server!`
-          : `Successfully synced ${res.succeeded} queued change(s)!`;
-        toast.success(msg);
-      }
-      if (res.failed > 0) {
-        toast.error(`Failed to sync ${res.failed} squad change(s). Will retry automatically.`);
-      }
     } catch (err) {
       console.error("Failed to sync queued mutations:", err);
     } finally {
@@ -102,7 +91,8 @@ export default function TeamPage() {
     }
   };
 
-  // Listen to queue changes, SW messages, and register SW
+  // Listen to queue changes and register SW. Automatic syncing on reconnection
+  // is app-wide (see OfflineIndicator -> startOfflineSyncCoordinator).
   useEffect(() => {
     refreshQueueCount();
     registerServiceWorker().catch(() => {});
@@ -111,36 +101,14 @@ export default function TeamPage() {
       refreshQueueCount();
     };
 
-    const handleSwMessage = (event: MessageEvent) => {
-      if (event.data?.type === "SYNC_SQUAD_MUTATIONS") {
-        handleManualSync();
-      }
-    };
-
-    if (typeof window !== "undefined") {
-      window.addEventListener("offline-queue-change", handleQueueChange);
-      if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.addEventListener("message", handleSwMessage);
-      }
-    }
-
-    return () => {
-      if (typeof window !== "undefined") {
-        window.removeEventListener("offline-queue-change", handleQueueChange);
-        if ("serviceWorker" in navigator) {
-          navigator.serviceWorker.removeEventListener("message", handleSwMessage);
-        }
-      }
-    };
+    window.addEventListener("offline-queue-change", handleQueueChange);
+    return () => window.removeEventListener("offline-queue-change", handleQueueChange);
   }, []);
 
-  // Auto-sync when reconnecting online
+  // Offline lineup edits are queued for this manager (issue #334)
   useEffect(() => {
-    if (!prevOnlineRef.current && isOnline) {
-      handleManualSync(true);
-    }
-    prevOnlineRef.current = isOnline;
-  }, [isOnline]);
+    setOwnerId(userId ?? null);
+  }, [userId, setOwnerId]);
   
   // Wildcard chip state
   const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
@@ -159,25 +127,7 @@ export default function TeamPage() {
     let cancelled = false;
 
     const applySquads = (squads: Squad[]) => {
-      if (squads.length === 0) return;
-      const s = squads[0];
-      setSquadId(s.id);
-      setSquadName(s.name);
-
-      if (s.players && s.players.length > 0) {
-        const mapped: LocalSquadPlayer[] = s.players
-          .filter((sp) => sp.player)
-          .map((sp) => ({
-            id: sp.id,
-            playerId: sp.playerId,
-            player: sp.player!,
-            isStarter: sp.isStarter,
-            isCaptain: sp.isCaptain,
-            isViceCaptain: sp.isViceCaptain,
-            positionOrder: sp.positionOrder,
-          }));
-        setPlayers(mapped);
-      }
+      if (squads.length > 0) hydrateFromSquad(squads[0]);
     };
 
     async function loadSquad() {
@@ -188,8 +138,15 @@ export default function TeamPage() {
           api.get<{ success: boolean; data: { id: number; name: string; deadline: string } | null }>("/api/v1/gameweeks/current"),
         ]);
         if (cancelled) return;
-        
-        if (squadRes?.data) {
+
+        // Changes queued offline are newer than the server copy: keep showing
+        // them (from the snapshot) until the sync coordinator replays them
+        const pendingSnapshot = (await hasUnsyncedMutations(userId!)) ? loadSquadSnapshot(userId!) : null;
+        if (cancelled) return;
+
+        if (pendingSnapshot) {
+          applySquads(pendingSnapshot.squads);
+        } else if (squadRes?.data) {
           saveSquadSnapshot(userId!, squadRes.data);
           applySquads(squadRes.data);
           
@@ -240,7 +197,7 @@ export default function TeamPage() {
       cancelled = true;
       window.removeEventListener("online", handleOnline);
     };
-  }, [isAuthenticated, authLoading, router, userId, setSquadId, setSquadName, setPlayers]);
+  }, [isAuthenticated, authLoading, router, userId, hydrateFromSquad]);
 
   // Derived state
   const starters = players
@@ -503,47 +460,15 @@ export default function TeamPage() {
   const handleSaveSquad = async () => {
     if (!canSave) return;
 
-    const payload = {
-      name: squadName.trim() || "My Fantasy XI",
-      players: players.map((p, idx) => ({
-        playerId: p.playerId,
-        isStarter: p.isStarter,
-        isCaptain: p.isCaptain,
-        isViceCaptain: p.isViceCaptain,
-        positionOrder: idx + 1,
-      })),
-    };
+    const payload = buildSquadPayload(squadName, players);
 
     if (!isOnline) {
       setIsSaving(true);
       setErrorMessage(null);
       try {
-        await enqueueSquadMutation({
-          squadId,
-          userId,
-          action: squadId ? "update" : "create",
-          payload,
-        });
-
-        // Also update local snapshot so the squad stays visible offline
-        if (userId) {
-          saveSquadSnapshot(userId, [
-            {
-              id: squadId || 0,
-              userId,
-              name: payload.name,
-              players: players.map((p, idx) => ({
-                id: p.id || idx + 1,
-                squadId: squadId || 0,
-                playerId: p.playerId,
-                isStarter: p.isStarter,
-                isCaptain: p.isCaptain,
-                isViceCaptain: p.isViceCaptain,
-                positionOrder: idx + 1,
-                player: p.player,
-              })),
-            } as Squad,
-          ]);
+        // Queues the lineup and updates the local snapshot so it survives reloads
+        if (!(await persistLineupOffline())) {
+          throw new Error("This lineup can't be queued offline. Complete your squad and try again.");
         }
 
         await refreshQueueCount();
@@ -787,7 +712,7 @@ export default function TeamPage() {
             </div>
             <button
               type="button"
-              onClick={() => handleManualSync(false)}
+              onClick={() => handleManualSync()}
               disabled={isSyncingOfflineQueue || !isOnline}
               className="px-3 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold uppercase tracking-wider text-[11px] transition-all disabled:opacity-50 flex items-center gap-1.5 self-start sm:self-auto cursor-pointer disabled:cursor-not-allowed"
             >

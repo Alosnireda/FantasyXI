@@ -609,7 +609,11 @@ export default function LeagueDetailPage({
 
       {/* Live squad points */}
       {liveSquadEntry && (
-        <LiveSquadModal entry={liveSquadEntry} onClose={() => setLiveSquadUserId(null)} />
+        <LiveSquadModal
+          entry={liveSquadEntry}
+          events={snapshot?.events}
+          onClose={() => setLiveSquadUserId(null)}
+        />
       )}
 
       {/* USDC Payment Modal */}
