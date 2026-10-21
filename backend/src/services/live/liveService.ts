@@ -1,3 +1,4 @@
+import { eventFanout } from "./eventFanout.js";
 import { prisma } from "../../config/db.js";
 import { getRedisClient, type IRedisCacheClient } from "../../config/redis.js";
 import { MembershipStatus, Position } from "../../types/index.js";
@@ -80,6 +81,11 @@ export function rankLiveStandings(
 }
 
 export class LiveService {
+  /** Called only after the corresponding stats transaction commits. */
+  public publishPlayerDelta(gameweekId: number, playerId: number, fixtureId: number, data: Record<string, unknown>): boolean {
+    return eventFanout.publish(`matchday:${gameweekId}`, `${playerId}:${fixtureId}`, { playerId, fixtureId, ...data });
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(
     private readonly db: any = prisma,

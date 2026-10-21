@@ -433,6 +433,7 @@ export class StellarService {
           success: false,
           txHash,
           error: "Transaction not found on Stellar network or ledger not yet closed.",
+          retryable: true,
         };
       }
 
@@ -440,6 +441,7 @@ export class StellarService {
         success: false,
         txHash,
         error: `Stellar network error: ${error?.message || "Unknown error"}`,
+        retryable: true,
       };
     }
   }
@@ -490,11 +492,22 @@ export class StellarService {
   /**
    * Dispatches an administrator-authorized settlement and waits for finality.
    */
+  public async resumeSettlementEnvelope(envelope: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    return client.resumeEnvelope(envelope);
+  }
+
+  public async getSettlementStatus(hash: string): Promise<{ status: string; ledger?: number }> {
+    return getSorobanRpcServer().getTransaction(hash);
+  }
+
   public async settleLeague(
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
     platformFeeStroops: bigint,
     distributionBps?: number[]
+    beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
     if (!client) {
@@ -515,6 +528,7 @@ export class StellarService {
       stellarConfig.treasuryAddress,
       platformFeeStroops,
       distributionBps
+      beforeSubmit
     );
   }
 

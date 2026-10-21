@@ -1,3 +1,4 @@
+import { liveService } from "../live/liveService.js";
 import { prisma } from "../../config/db.js";
 import { fplClient } from "./fplClient.js";
 import crypto from "crypto";
@@ -403,6 +404,11 @@ export class FplSyncService {
 
     let statsCount = 0;
     const statsOps = [];
+    const committedDeltas: Array<{ playerId: number; fixtureId: number; data: Record<string, unknown> }> = [];
+    const publishDeltas = () => {
+      for (const delta of committedDeltas) liveService.publishPlayerDelta(gameweek.id, delta.playerId, delta.fixtureId, delta.data);
+      committedDeltas.length = 0;
+    };
     
     for (const rawElement of liveData.elements) {
       const localPlayerId = playerMap.get(rawElement.id);
@@ -452,9 +458,11 @@ export class FplSyncService {
             })
           );
           statsCount++;
+          committedDeltas.push({ playerId: localPlayerId, fixtureId: localFixtureId, data: payload });
           
           if (statsOps.length >= 100) {
             await prisma.$transaction(statsOps);
+            publishDeltas();
             statsOps.length = 0;
           }
         }
@@ -463,6 +471,7 @@ export class FplSyncService {
 
     if (statsOps.length > 0) {
       await prisma.$transaction(statsOps);
+      publishDeltas();
     }
 
     console.log(

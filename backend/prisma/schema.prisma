@@ -805,6 +805,8 @@ model FinancialAuditLog {
 /// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
 /// State lives here (not in memory) so polling resumes after a backend restart.
 model CoordinatedTransaction {
+  /// One durable signed settlement per league; never blindly resubmit after a partition.
+  settlementKey String? @unique @map("settlement_key")
   id            String                       @id @default(uuid())
   txHash        String                       @unique @map("tx_hash")
   /// What the transaction does, e.g. DEPOSIT, SETTLEMENT, REFUND
