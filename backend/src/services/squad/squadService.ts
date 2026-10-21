@@ -36,6 +36,13 @@ export class SquadForbiddenError extends Error {
   }
 }
 
+export class SquadRevisionConflictError extends Error {
+  constructor(public readonly currentRevision: Date) {
+    super("This squad changed on the server while your offline edits were pending");
+    this.name = "SquadRevisionConflictError";
+  }
+}
+
 /** A transfer pairing: one player sold for one player of the same position bought. */
 export interface TransferPair {
   playerOutId: number;
@@ -297,6 +304,16 @@ export class SquadService {
       });
       if (!squad) {
         throw new SquadValidationError(`Squad ${squadId} not found`);
+      }
+
+      if (input.expectedUpdatedAt !== undefined) {
+        const expectedTime = Date.parse(input.expectedUpdatedAt);
+        if (!Number.isFinite(expectedTime)) {
+          throw new SquadValidationError("expectedUpdatedAt must be a valid timestamp");
+        }
+        if (squad.updatedAt.getTime() !== expectedTime) {
+          throw new SquadRevisionConflictError(squad.updatedAt);
+        }
       }
 
       // The earliest unfinished gameweek governs every edit: once its deadline

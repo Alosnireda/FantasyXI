@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import {
   squadService,
   SquadForbiddenError,
+  SquadRevisionConflictError,
   ChipUnavailableError,
   ChipCancellationLockedError,
 } from "../services/squad/squadService.js";
@@ -110,6 +111,16 @@ export async function updateSquad(
       data: squad,
     });
   } catch (error) {
+    if (error instanceof SquadRevisionConflictError) {
+      res.status(409).json({
+        success: false,
+        message: error.message,
+        data: {
+          revision: error.currentRevision.toISOString(),
+        },
+      });
+      return;
+    }
     if (error instanceof SquadForbiddenError) {
       res.status(403).json({
         success: false,
