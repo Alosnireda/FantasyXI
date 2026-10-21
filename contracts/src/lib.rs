@@ -946,6 +946,60 @@ impl FantasyXIEscrow {
         Ok(())
     }
 
+    /// Refund one deposit without cancelling the league. Removing its storage key
+    /// prevents a second payout for the same participant and league.
+    pub fn refund_deposit(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        participant: Address,
+    ) -> Result<(), EscrowError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(EscrowError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+        if league.status == LeagueStatus::Settled {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        let deposit_key = DataKey::Deposit(league_id, participant.clone());
+        let amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&deposit_key)
+            .ok_or(EscrowError::NoDeposit)?;
+        if amount <= 0 {
+            return Err(EscrowError::AlreadyClaimed);
+        }
+
+        token::Client::new(&env, &league.asset).transfer(
+            &env.current_contract_address(),
+            &participant,
+            &amount,
+        );
+        env.storage().persistent().remove(&deposit_key);
+        league.total_deposited -= amount;
+        league.participant_count -= 1;
+        env.storage().persistent().set(&league_key, &league);
+        env.events().publish(
+            (Symbol::new(&env, "DepositRefunded"), league_id),
+            (participant, amount),
+        );
+        Ok(())
+    }
+
     /// Admin refunds deposits if a competition cannot proceed or is cancelled.
     pub fn refund(
         env: Env,
@@ -1753,6 +1807,35 @@ mod test {
     }
 
     #[test]
+    fn test_single_deposit_refund_preserves_league_and_is_one_time() {
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+        let token_client = token::Client::new(&env, &token_addr);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+        for participant in [&first, &second] {
+            token_admin_client.mint(participant, &50_000_000);
+        }
+        client.create_league(&admin, &301, &50_000_000, &token_addr);
+        client.deposit(&first, &301);
+        client.deposit(&second, &301);
+
+        client.refund_deposit(&admin, &301, &first);
+        assert_eq!(token_client.balance(&first), 50_000_000);
+        assert_eq!(
+            client.get_league(&301).unwrap().status,
+            LeagueStatus::Active
+        );
+        assert_eq!(client.get_league(&301).unwrap().participant_count, 1);
+        assert_eq!(
+            client.try_refund_deposit(&admin, &301, &first),
+            Err(Ok(EscrowError::NoDeposit))
+        );
+        assert_eq!(token_client.balance(&first), 50_000_000);
+        assert_eq!(token_client.balance(&second), 0);
+    }
+
+    #[test]
     fn test_partial_refund_multi_party_league() {
         // 4 participants deposit into a league that is later cancelled. The
         // admin refunds them in two separate batches (mirroring the
@@ -2552,6 +2635,7 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+
     }
 
     #[test]

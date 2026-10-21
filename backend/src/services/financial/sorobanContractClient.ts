@@ -699,6 +699,20 @@ export class SorobanContractClient {
     ]);
   }
 
+  /** Refund a single verified deposit without cancelling the rest of its league. */
+  public async refundDeposit(
+    adminSecret: string,
+    adminPublic: string,
+    leagueId: number | bigint,
+    participant: string
+  ): Promise<InvocationResult> {
+    return this.invoke(adminSecret, this.escrowContractId, "refund_deposit", [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.address(participant),
+    ]);
+  }
+
   /**
    * Query on-chain league state.
    */
