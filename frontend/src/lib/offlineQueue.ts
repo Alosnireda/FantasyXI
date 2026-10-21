@@ -6,7 +6,7 @@
  * syncs them when network connectivity is restored.
  */
 
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 
 export const DB_NAME = "fantasyxi-offline-queue";
 export const DB_VERSION = 1;
@@ -36,8 +36,10 @@ export interface QueuedSquadMutation {
   payload: SquadMutationPayload;
   timestamp: number;
   retryCount: number;
-  status: "pending" | "syncing" | "failed";
+  status: "pending" | "syncing" | "failed" | "conflict";
   lastError?: string;
+  baseRevision?: string;
+  serverRevision?: string;
 }
 
 export interface OfflineQueueStorage {
@@ -241,6 +243,7 @@ export async function enqueueSquadMutation(data: {
   userId?: string | null;
   action?: "update" | "create";
   payload: SquadMutationPayload;
+  baseRevision?: string;
 }): Promise<QueuedSquadMutation> {
   const storage = getQueueStorage();
   const existingMutations = await storage.getAll();
@@ -255,6 +258,7 @@ export async function enqueueSquadMutation(data: {
     userId: data.userId ?? null,
     action: data.action ?? (data.squadId ? "update" : "create"),
     payload: data.payload,
+    baseRevision: conflicting?.baseRevision ?? data.baseRevision,
     timestamp: Date.now(),
     retryCount: 0,
     status: "pending",
@@ -277,7 +281,7 @@ export async function getQueuedMutations(): Promise<QueuedSquadMutation[]> {
 export async function getQueuedMutationCount(): Promise<number> {
   const storage = getQueueStorage();
   const all = await storage.getAll();
-  return all.filter((m) => m.status === "pending" || m.status === "syncing").length;
+  return all.filter((m) => m.status === "pending" || m.status === "syncing" || m.status === "conflict").length;
 }
 
 export async function removeQueuedMutation(id: string): Promise<void> {
@@ -314,6 +318,19 @@ export async function clearQueuedMutations(): Promise<void> {
   notifyQueueChange();
 }
 
+export async function updateQueuedMutationRevision(id: string, revision: string): Promise<void> {
+  const storage = getQueueStorage();
+  const mutation = await storage.get(id);
+  if (!mutation) return;
+  mutation.baseRevision = revision;
+  mutation.serverRevision = undefined;
+  mutation.status = "pending";
+  mutation.retryCount = 0;
+  mutation.lastError = undefined;
+  await storage.put(mutation);
+  notifyQueueChange();
+}
+
 // ---------------------------------------------------------------------------
 // Background Sync Registration
 // ---------------------------------------------------------------------------
@@ -343,6 +360,7 @@ export interface SyncResult {
   succeeded: number;
   failed: number;
   syncedIds: string[];
+  conflicts: Array<{ id: string; squadId?: number | string | null; serverRevision: string }>;
 }
 
 export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> {
@@ -354,6 +372,7 @@ export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> 
     succeeded: 0,
     failed: 0,
     syncedIds: [],
+    conflicts: [],
   };
 
   for (const mutation of pending) {
@@ -363,7 +382,10 @@ export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> 
 
     try {
       if (mutation.action === "update" && mutation.squadId) {
-        await apiClient.put(`/api/v1/squads/${mutation.squadId}`, mutation.payload);
+        await apiClient.put(`/api/v1/squads/${mutation.squadId}`, {
+          ...mutation.payload,
+          expectedUpdatedAt: mutation.baseRevision,
+        });
       } else {
         await apiClient.post("/api/v1/squads", {
           ...mutation.payload,
@@ -375,6 +397,17 @@ export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> 
       result.succeeded += 1;
       result.syncedIds.push(mutation.id);
     } catch (err: unknown) {
+      const conflictData = err instanceof ApiError
+        ? err.data as { data?: { revision?: unknown } }
+        : undefined;
+      if (err instanceof ApiError && err.status === 409 && typeof conflictData?.data?.revision === "string") {
+        mutation.status = "conflict";
+        mutation.serverRevision = conflictData.data.revision;
+        mutation.lastError = err.message;
+        await storage.put(mutation);
+        result.conflicts.push({ id: mutation.id, squadId: mutation.squadId, serverRevision: mutation.serverRevision });
+        continue;
+      }
       result.failed += 1;
       const errorMsg =
         err instanceof Error ? err.message : "Network error during squad sync";

@@ -506,6 +506,7 @@ export class StellarService {
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
     platformFeeStroops: bigint,
+    distributionBps?: number[]
     beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
@@ -526,6 +527,7 @@ export class StellarService {
       winners,
       stellarConfig.treasuryAddress,
       platformFeeStroops,
+      distributionBps
       beforeSubmit
     );
   }

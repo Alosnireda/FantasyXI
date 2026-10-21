@@ -379,6 +379,7 @@ export class FplClient {
         yellow_cards: number;
         red_cards: number;
         saves: number;
+        bps: number;
         bonus: number;
         total_points: number;
       };
