@@ -33,6 +33,7 @@ import {
   xdr,
   Transaction,
 } from "@stellar/stellar-sdk";
+import { PrizeService } from "../league/prizeService.js";
 import {
   LocalSecretTransactionSigner,
   type StellarTransactionSigner,
@@ -511,9 +512,22 @@ export class SorobanContractClient {
     winners: WinnerPayoutParam[],
     platformTreasury: string,
     platformFeeStroops: bigint,
+    distributionBps?: number[]
     beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const winnersScVal = SorobanContractClient.winnersScVal(winners);
+
+    if (distributionBps) {
+      PrizeService.encodeSorobanDistribution(distributionBps);
+      return this.invoke(adminSecret, this.escrowContractId, "settle_with_distribution", [
+        SorobanContractClient.address(adminPublic),
+        SorobanContractClient.u64(leagueId),
+        winnersScVal,
+        SorobanContractClient.address(platformTreasury),
+        SorobanContractClient.i128(platformFeeStroops),
+        xdr.ScVal.scvVec(distributionBps.map((value) => nativeToScVal(value, { type: "u32" }))),
+      ]);
+    }
 
     return this.invoke(adminSecret, this.escrowContractId, "settle", [
       SorobanContractClient.address(adminPublic),
@@ -682,6 +696,20 @@ export class SorobanContractClient {
       SorobanContractClient.address(adminPublic),
       SorobanContractClient.u64(leagueId),
       xdr.ScVal.scvVec(participants.map((p) => SorobanContractClient.address(p))),
+    ]);
+  }
+
+  /** Refund a single verified deposit without cancelling the rest of its league. */
+  public async refundDeposit(
+    adminSecret: string,
+    adminPublic: string,
+    leagueId: number | bigint,
+    participant: string
+  ): Promise<InvocationResult> {
+    return this.invoke(adminSecret, this.escrowContractId, "refund_deposit", [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.address(participant),
     ]);
   }
 

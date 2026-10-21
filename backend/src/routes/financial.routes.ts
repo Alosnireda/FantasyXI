@@ -21,6 +21,7 @@ import { requireAuth, requirePermission, requireRole } from "../middleware/authM
 import { Permission, UserRole } from "../types/index.js";
 import { financialRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 import { idempotency } from "../middleware/idempotency.js";
+import { getMyDepositExceptions, getDepositRefundChallenge, submitDepositRefundClaim } from "../controllers/depositRefund.controller.js";
 
 const router = Router({ mergeParams: true });
 
@@ -50,6 +51,9 @@ router.get("/affiliate-dashboard", requirePermission(Permission.AFFILIATE_READ_O
 // Self-service recovery: checks the escrow contract directly for the caller's own
 // deposit when the wallet's success callback never reached submit/verify above.
 router.post("/reconcile-deposit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), reconcileDeposit);
+router.get("/refund-claim/:txHash/challenge", requirePermission(Permission.PAYMENT_MANAGE_OWN), getDepositRefundChallenge);
+router.get("/refund-claim/exceptions", requirePermission(Permission.PAYMENT_MANAGE_OWN), getMyDepositExceptions);
+router.post("/refund-claim", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), submitDepositRefundClaim);
 
 // Reconciliation exposes sensitive league financial reports and requires the
 // financial:reconcile permission (ADMIN, MODERATOR and SERVICE roles).
