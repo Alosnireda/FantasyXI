@@ -14,6 +14,7 @@
 
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError } from "@/lib/offlineStore";
+import { ApiError, api } from "@/lib/api";
 
 export const DB_NAME = "fantasyxi-offline-queue";
 export const DB_VERSION = 1;
@@ -49,8 +50,10 @@ export interface QueuedSquadMutation {
   /** Causal position: replay order, persisted so it survives reloads (issue #334). */
   seq?: number;
   retryCount: number;
-  status: "pending" | "syncing" | "failed";
+  status: "pending" | "syncing" | "failed" | "conflict";
   lastError?: string;
+  baseRevision?: string;
+  serverRevision?: string;
 }
 
 export interface OfflineQueueStorage {
@@ -297,6 +300,7 @@ export async function enqueueSquadMutation(data: {
   userId?: string | null;
   action?: "update" | "create";
   payload: SquadMutationPayload;
+  baseRevision?: string;
 }): Promise<QueuedSquadMutation> {
   const mutation = (await runExclusive(QUEUE_LOCK, async () => {
     const storage = getQueueStorage();
@@ -321,6 +325,26 @@ export async function enqueueSquadMutation(data: {
     await storage.put(queued);
     return queued;
   }))!;
+  const storage = getQueueStorage();
+  const existingMutations = await storage.getAll();
+
+  const conflicting = existingMutations.find(
+    (m) => m.status === "pending" && detectMutationConflict(m, data)
+  );
+
+  const mutation: QueuedSquadMutation = {
+    id: conflicting ? conflicting.id : `mut_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    squadId: data.squadId ?? null,
+    userId: data.userId ?? null,
+    action: data.action ?? (data.squadId ? "update" : "create"),
+    payload: data.payload,
+    baseRevision: conflicting?.baseRevision ?? data.baseRevision,
+    timestamp: Date.now(),
+    retryCount: 0,
+    status: "pending",
+  };
+
+  await storage.put(mutation);
   notifyQueueChange();
 
   // Attempt to register background sync with the service worker
@@ -343,7 +367,7 @@ export async function hasUnsyncedMutations(userId: string): Promise<boolean> {
 export async function getQueuedMutationCount(): Promise<number> {
   const storage = getQueueStorage();
   const all = await storage.getAll();
-  return all.filter((m) => m.status === "pending" || m.status === "syncing").length;
+  return all.filter((m) => m.status === "pending" || m.status === "syncing" || m.status === "conflict").length;
 }
 
 export async function removeQueuedMutation(id: string): Promise<void> {
@@ -377,6 +401,19 @@ export async function incrementMutationRetry(
 export async function clearQueuedMutations(): Promise<void> {
   const storage = getQueueStorage();
   await storage.clear();
+  notifyQueueChange();
+}
+
+export async function updateQueuedMutationRevision(id: string, revision: string): Promise<void> {
+  const storage = getQueueStorage();
+  const mutation = await storage.get(id);
+  if (!mutation) return;
+  mutation.baseRevision = revision;
+  mutation.serverRevision = undefined;
+  mutation.status = "pending";
+  mutation.retryCount = 0;
+  mutation.lastError = undefined;
+  await storage.put(mutation);
   notifyQueueChange();
 }
 
@@ -434,6 +471,7 @@ export interface SyncResult {
   rejected: RejectedMutation[];
   /** Why the flush stopped early, if it did; "busy" when another tab is flushing. */
   halted: Exclude<SyncFailureKind, "rejected"> | "busy" | null;
+  conflicts: Array<{ id: string; squadId?: number | string | null; serverRevision: string }>;
 }
 
 export function classifySyncError(error: unknown): SyncFailureKind {
@@ -457,6 +495,12 @@ function rejectionReason(error: unknown): RejectionReason {
   if (error.status === 404) return "NOT_FOUND";
   return "REJECTED";
 }
+  const result: SyncResult = {
+    succeeded: 0,
+    failed: 0,
+    syncedIds: [],
+    conflicts: [],
+  };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Network error during squad sync";
@@ -509,7 +553,10 @@ async function flushQueue(apiClient: typeof api, result: SyncResult): Promise<Sy
 
     try {
       if (mutation.action === "update" && mutation.squadId) {
-        await apiClient.put(`/api/v1/squads/${mutation.squadId}`, mutation.payload);
+        await apiClient.put(`/api/v1/squads/${mutation.squadId}`, {
+          ...mutation.payload,
+          expectedUpdatedAt: mutation.baseRevision,
+        });
       } else {
         await apiClient.post("/api/v1/squads", {
           ...mutation.payload,
@@ -528,6 +575,17 @@ async function flushQueue(apiClient: typeof api, result: SyncResult): Promise<Sy
         break;
       }
 
+      const conflictData = err instanceof ApiError
+        ? err.data as { data?: { revision?: unknown } }
+        : undefined;
+      if (err instanceof ApiError && err.status === 409 && typeof conflictData?.data?.revision === "string") {
+        mutation.status = "conflict";
+        mutation.serverRevision = conflictData.data.revision;
+        mutation.lastError = err.message;
+        await storage.put(mutation);
+        result.conflicts.push({ id: mutation.id, squadId: mutation.squadId, serverRevision: mutation.serverRevision });
+        continue;
+      }
       result.failed += 1;
       if (kind === "rejected") {
         await storage.delete(mutation.id);

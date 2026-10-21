@@ -220,6 +220,7 @@ export interface CreateSquadInput {
 export interface UpdateSquadInput {
   name?: string;
   players: SquadPlayerSelection[];
+  expectedUpdatedAt?: string;
 }
 
 export interface PlayerFilterQuery {
@@ -250,6 +251,8 @@ export interface CreateLeagueInput {
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
   isPrivate?: boolean; // default false: private leagues are invitation-only
+  payoutPreset?: "standard" | "winner-takes-all" | "top-five" | "custom";
+  customPrizeSplitsBps?: number[];
 }
 
 export interface CreateLeagueTierGroupInput {
@@ -407,6 +410,7 @@ export interface SettlementPlan {
   platformFee: number;
   netPrizePool: number;
   winners: SettlementWinner[];
+  distributionBps?: number[];
   canSettle: boolean;
   proofHash?: string;
   unsettledReason?: string;
